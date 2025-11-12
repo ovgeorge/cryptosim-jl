@@ -1,0 +1,26 @@
+{
+  "configuration": [
+    {
+      "A": 0.254,
+      "D": 300000000.0,
+      "adjustment_step": 0.0015,
+      "fee_gamma": 0.00153,
+      "gamma": 0.0008,
+      "ma_half_time": 600,
+      "mid_fee": 0.0008,
+      "n": 2,
+      "log": 0,
+      "out_fee": 0.0076,
+      "price_threshold": 0.0028,
+      "ext_fee": 0.0003,
+      "allowed_extra_profit": 0.0,
+      "gas_fee": 0.0,
+      "boost_rate": 0.0
+    }
+  ],
+  "datafile": [
+    "ethusdt-1m"
+  ],
+  "debug": 0
+}
+
