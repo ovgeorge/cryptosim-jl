@@ -1,0 +1,112 @@
+--- main.cpp
++++ main.cpp
+@@ -1282,11 +1282,11 @@ auto step_for_price_3(money p_min, money p_max, pair<int, int> p, money vol, mon
+             for (int ctr=0;ctr<2;ctr++) {
+                 step = -step;
+                 _dx = _dx_prev + step;
+ 
+                 x = x0[_from] + _dx;
+-                y = curve.y_2(x, _from, _to);
++                y = curve.y_3(x, _from, _to);
+ 
+                 curve.x[_from] = x;
+                 curve.x[_to] = y;
+-                auto fee_mul = 1.L - this->fee_2();
++                auto fee_mul = 1.L - this->fee_3();
+ 
+                 _dy = (x0[_to] - y) * fee_mul;
+                 curve.x[_to] = x0[_to] - _dy;
+@@ -1595,13 +1595,13 @@ auto tweak_price_2(u64 t, int a, int b, money p) {
+             auto t = price_oracle[i] / curve.p[i] - 1.L;
+             S += t*t;
+         }
+         auto norm = S;
+-        norm = sqrt(norm); // .root_to();
++        norm = sqrtl(norm); // .root_to();
+         auto _adjustment_step = max(adjustment_step, norm / 10);
+         if (norm <= _adjustment_step) {
+             // Already close to the target price
+             is_light = true;
+             light_tx += 1;
+             return norm;
+         }
+-        if (not not_adjusted and (xcp_profit_real > sqrt(xcp_profit) * (1.L + allowed_extra_profit))) {
++        if (not not_adjusted and (xcp_profit_real > sqrtl(xcp_profit) * (1.L + allowed_extra_profit))) {
+             not_adjusted = true;
+         }
+         if (not not_adjusted) {
+@@ -1630,7 +1630,7 @@ auto tweak_price_2(u64 t, int a, int b, money p) {
+         copy_money_2(&curve.p[0],p_new);
+         update_xcp_2(true);
+ 
+-        if (xcp_profit_real <= sqrt(xcp_profit)) {
++        if (xcp_profit_real <= sqrtl(xcp_profit)) {
+             //  If real profit is less than half of maximum - revert params back
+             copy_money_2(&curve.p[0], old_p);
+             xcp_profit_real = old_profit;
+@@ -1659,13 +1659,13 @@ auto tweak_price_3(u64 t, int a, int b, money p) {
+             auto t = price_oracle[i] / curve.p[i] - 1.L;
+             S += t*t;
+         }
+         auto norm = S;
+-        norm = sqrt(norm); // .root_to();
++        norm = sqrtl(norm); // .root_to();
+         auto _adjustment_step = max(adjustment_step, norm / 10);
+         if (norm <= _adjustment_step) {
+             // Already close to the target price
+             is_light = true;
+             light_tx += 1;
+             return norm;
+         }
+-        if (not not_adjusted and (xcp_profit_real > sqrt(xcp_profit) * (1.L + allowed_extra_profit))) {
++        if (not not_adjusted and (xcp_profit_real > sqrtl(xcp_profit) * (1.L + allowed_extra_profit))) {
+             not_adjusted = true;
+         }
+         if (not not_adjusted) {
+@@ -1694,7 +1694,7 @@ auto tweak_price_3(u64 t, int a, int b, money p) {
+         copy_money_3(&curve.p[0],p_new);
+         if (N == 3) update_xcp_3(true);
+         else        update_xcp_2(true);
+ 
+-        if (xcp_profit_real <= sqrt(xcp_profit)) {
++        if (xcp_profit_real <= sqrtl(xcp_profit)) {
+             //  If real profit is less than half of maximum - revert params back
+             copy_money_3(&curve.p[0], old_p);
+             xcp_profit_real = old_profit;
+@@ -1732,6 +1732,7 @@ void simulate(mapped_file const *in, simulation_data *simdata, extra_data *extda
+             if (last_time > 0) {
+                 last_time = d.t - last_time;
+             }
++            _slippage = 0;
+ 
+             auto a = d.pair1.first;
+             auto b = d.pair1.second;
+@@ -1755,7 +1756,7 @@ void simulate(mapped_file const *in, simulation_data *simdata, extra_data *extda
+             money _dx = 0;
+             auto p_before = N == 3 ? price_3(a, b) : price_2(a, b);
+ 
+-            if ((max_price != 0) & (max_price > p_before)) {
++            if ((max_price != 0) && (max_price > p_before)) {
+                 auto step = N == 3 ? step_for_price_3(0, max_price, d.pair1, vol, ext_vol) : step_for_price_2(0, max_price, d.pair1, vol, ext_vol);
+                 if (step > 0) {
+                     // printf("+++ %Lf %Lf %d %d\n", curve.x[a], curve.x[b], a, b);
+@@ -1808,7 +1809,7 @@ void simulate(mapped_file const *in, simulation_data *simdata, extra_data *extda
+             _dx = 0;
+             p_before = p_after;
+ 
+-            if ((min_price != 0) & (min_price < p_before)) {
++            if ((min_price != 0) && (min_price < p_before)) {
+                 auto step = N == 3 ? step_for_price_3(min_price, 0, d.pair1, vol, ext_vol) : step_for_price_2(min_price, 0, d.pair1, vol, ext_vol);
+                 if (step > 0) {
+                     // printf("=== %Lf %Lf %d %d\n", curve.x[a], curve.x[b], a, b);
+@@ -652,6 +653,8 @@ bool get_all(json const &jin, int last_elems, vector<money> & price_vector, mapp
+         printf("Temp file '%s' is not available\n", tmp_name.c_str());
+         return false;
+     }
+     printf("Using temp file '%s' as interprocedural connect\n", tmp_name.c_str());
+     fwrite(&ret[0], sizeof(trade_data), ret.size(), tmp);
++    fflush(tmp);
++    fclose(tmp);
+     //unlink(tmp_name.c_str()); // Does not work in Windows
+     mf.map(tmp_name);
+     return true;
