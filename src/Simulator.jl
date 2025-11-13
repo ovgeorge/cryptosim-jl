@@ -1095,6 +1095,7 @@ end
         ai = asset_index(a)
         bi = asset_index(b)
         last_quote = get(lasts, trade.pair, trader.tweak.price_oracle[bi] / trader.tweak.price_oracle[ai])
+        update_price_oracle!(trader, trade)
         trade_dt = prev_trade_ts == 0 ? zero(T) : T(trade.timestamp - prev_trade_ts)
         vol = zero(T)
         ext_vol = T(trade.volume) * trader.tweak.price_oracle[bi]
@@ -1111,6 +1112,7 @@ end
             state, candle_id, trade, cfg, price_before, vol, ext_vol, trade_dt,
             last_quote, high_quote, ctr,
         )
+        update_price_oracle!(trader, trade.pair, last_quote)
         high_quote = last_quote
         price_before = last_quote
 
@@ -1119,24 +1121,27 @@ end
             state, candle_id, trade, cfg, price_before, vol, ext_vol, trade_dt,
             last_quote, low_quote, ctr,
         )
+        update_price_oracle!(trader, trade.pair, last_quote)
         low_quote = last_quote
 
         lasts[trade.pair] = last_quote
-        if trader.fees.boost_rate > 0
-            factor = apply_boost!(trader.curve, trade_dt, trader.fees.boost_rate)
-            trader.profit.xcp_profit_real *= factor
-            trader.profit.xcp *= factor
+        if trade.is_last
+            if trader.fees.boost_rate > 0 && trade_dt > 0
+                factor = apply_boost!(trader.curve, trade_dt, trader.fees.boost_rate)
+                trader.profit.xcp_profit_real *= factor
+                trader.profit.xcp *= factor
+            end
+            midpoint = (high_quote + low_quote) / T(2)
+            tweak_price!(trader, trade.timestamp, trade.pair, midpoint)
+            Instr.log_tweak_event(state.debug.logger, 0, trade.candle_index, trade, midpoint, high_quote, low_quote, trader)
+            trader.metrics_state.total_vol += vol
+            elapsed = max(Int64(1), trade.timestamp - start_timestamp + 1)
+            ARU_x = trader.profit.xcp_profit_real
+            ARU_y = (T(86400) * T(365)) / T(elapsed)
+            trader.profit.APY = ARU_x^ARU_y - one(T)
+            Metrics.set_apy!(state.metrics, trader.profit.APY)
+            prev_trade_ts = trade.timestamp
         end
-        midpoint = (high_quote + low_quote) / T(2)
-        tweak_price!(trader, trade.timestamp, trade.pair, midpoint)
-        Instr.log_tweak_event(state.debug.logger, 0, trade.candle_index, trade, midpoint, high_quote, low_quote, trader)
-        trader.metrics_state.total_vol += vol
-        elapsed = max(Int64(1), trade.timestamp - start_timestamp + 1)
-        ARU_x = trader.profit.xcp_profit_real
-        ARU_y = (T(86400) * T(365)) / T(elapsed)
-        trader.profit.APY = ARU_x^ARU_y - one(T)
-        Metrics.set_apy!(state.metrics, trader.profit.APY)
-        prev_trade_ts = trade.timestamp
     end
     return state
 end
@@ -1145,22 +1150,26 @@ function run_cpp_trade_bundle!(state::SimulationState{T}, trades::AbstractVector
     return run_split_trades!(state, adapt_trades(trades))
 end
 
-function update_price_oracle!(trader::Trader{T}, trade::SplitTrade) where {T}
-    a, b = trade.pair
+function update_price_oracle!(trader::Trader{T}, pair::Tuple{Int,Int}, close_val) where {T}
+    a, b = pair
     ai = asset_index(a)
     bi = asset_index(b)
     oracle = trader.tweak.price_oracle
     if a == 0
         if bi <= length(oracle)
-            oracle[bi] = T(trade.close)
+            oracle[bi] = T(close_val)
         end
     elseif b == 0
-        if ai <= length(oracle) && trade.close != 0
-            oracle[ai] = T(1 / trade.close)
+        if ai <= length(oracle) && close_val != 0
+            oracle[ai] = T(1 / close_val)
         end
     elseif ai <= length(oracle) && bi <= length(oracle)
-        oracle[bi] = oracle[ai] * T(trade.close)
+        oracle[bi] = oracle[ai] * T(close_val)
     end
+end
+
+function update_price_oracle!(trader::Trader{T}, trade::SplitTrade) where {T}
+    update_price_oracle!(trader, trade.pair, trade.close)
 end
 
 end # module
