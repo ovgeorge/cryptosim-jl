@@ -1,8 +1,6 @@
 module DataIO
 
 using JSON3
-using Mmap
-using Parsers
 using StructTypes
 
 try
@@ -12,7 +10,6 @@ catch
 end
 
 const DEFAULT_DATA_DIR = normpath(joinpath(@__DIR__, "..", "cryptopool-simulator", "download"))
-const PARSER_OPTS = Parsers.Options()
 
 export Candle, SimulationConfig, ConfigFile, CPPTrade, load_config, load_candles,
        load_trade_bundle, build_cpp_trades, initial_price_vector, DEFAULT_DATA_DIR,
@@ -167,8 +164,7 @@ Streams a Binance-style `[timestamp, "open", "high", ...]` JSON file into memory
 function load_candles(source::AbstractString; pair::Tuple{Int,Int}=(0, 1), data_dir::AbstractString=DEFAULT_DATA_DIR)
     path = _resolve_candle_path(source, data_dir)
     open(path, "r") do io
-        mapped = Mmap.mmap(io)
-        return _parse_candles(mapped, pair)
+        return _parse_candles(io, pair, path)
     end
 end
 
@@ -182,70 +178,44 @@ function _resolve_candle_path(source::AbstractString, data_dir::AbstractString)
     return path
 end
 
-@inline function _is_delim(byte::UInt8)
-    byte == UInt8(' ') || byte == UInt8('\n') || byte == UInt8('\r') ||
-    byte == UInt8('\t') || byte == UInt8(',')
-end
-
-@inline function _skip_delims(data::Vector{UInt8}, idx::Int, len::Int)
-    while idx <= len && _is_delim(data[idx])
-        idx += 1
-    end
-    return idx
-end
-
-function _parse_number(::Type{T}, data::Vector{UInt8}, idx::Int, len::Int) where {T}
-    idx = _skip_delims(data, idx, len)
-    quoted = false
-    if idx <= len && data[idx] == UInt8('"')
-        quoted = true
-        idx += 1
-    end
-    result = Parsers.xparse(T, data, idx, len, PARSER_OPTS)
-    result.tlen > 0 || error("numeric parse failed near position $idx")
-    idx += result.tlen
-    idx = _skip_delims(data, idx, len)
-    if quoted && idx <= len && data[idx] == UInt8('"')
-        idx += 1
-    end
-    return result.val, idx
-end
-
-function _parse_candles(data::Vector{UInt8}, pair::Tuple{Int,Int})
-    len = length(data)
-    idx = findfirst(==(UInt8('[')), data)
-    idx === nothing && error("invalid candle JSON payload")
-    idx += 1
-    candles = Vector{Candle}()
-    while idx <= len
-        idx = _skip_delims(data, idx, len)
-        if idx > len || data[idx] == UInt8(']')
-            break
-        end
-        if data[idx] != UInt8('[')
-            idx += 1
-            continue
-        end
-        idx += 1
-        ts_raw, idx = _parse_number(Int64, data, idx, len)
-        ts = ts_raw > 10_000_000_000 ? ts_raw ÷ 1000 : ts_raw
-        open_, idx = _parse_number(Float64, data, idx, len)
-        high, idx = _parse_number(Float64, data, idx, len)
-        low, idx = _parse_number(Float64, data, idx, len)
-        close, idx = _parse_number(Float64, data, idx, len)
-        volume, idx = _parse_number(Float64, data, idx, len)
-        idx = _advance_to_char(data, idx, len, UInt8(']')) + 1
-        push!(candles, Candle(ts, open_, high, low, close, volume, pair))
+function _parse_candles(io::IO, pair::Tuple{Int,Int}, label::AbstractString)
+    rows = JSON3.read(io)
+    isa(rows, AbstractVector) || error("candle payload in $(label) must be a JSON array")
+    candles = Vector{Candle}(undef, length(rows))
+    @inbounds for (idx, row) in enumerate(rows)
+        rowlen = length(row)
+        rowlen == 6 || error("candle row $(idx) in $(label) must contain 6 entries (got $(rowlen))")
+        ts = _normalize_timestamp(row[1], label, idx)
+        open_ = _coerce_float(row[2], label, idx, "open")
+        high = _coerce_float(row[3], label, idx, "high")
+        low = _coerce_float(row[4], label, idx, "low")
+        close = _coerce_float(row[5], label, idx, "close")
+        volume = _coerce_float(row[6], label, idx, "volume")
+        candles[idx] = Candle(ts, open_, high, low, close, volume, pair)
     end
     return candles
 end
 
-function _advance_to_char(data::Vector{UInt8}, idx::Int, len::Int, target::UInt8)
-    while idx <= len && data[idx] != target
-        idx += 1
+@inline function _normalize_timestamp(val, label, idx)
+    val === nothing && error("candle row $(idx) in $(label) is missing a timestamp")
+    ts_raw = if val isa Integer
+        Int64(val)
+    elseif val isa AbstractFloat
+        isfinite(val) || error("candle row $(idx) in $(label) has non-finite timestamp")
+        Int64(round(Int, val))
+    else
+        error("candle row $(idx) in $(label) has invalid timestamp type $(typeof(val))")
     end
-    idx <= len || error("unterminated array entry while parsing candles")
-    return idx
+    return ts_raw > 10_000_000_000 ? ts_raw ÷ 1000 : ts_raw
+end
+
+@inline function _coerce_float(val, label, idx, field)
+    val === nothing && error("candle row $(idx) in $(label) is missing $(field)")
+    if val isa Real
+        return Float64(val)
+    else
+        error("candle row $(idx) in $(label) has non-numeric $(field)")
+    end
 end
 
 """

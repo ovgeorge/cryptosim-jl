@@ -13,69 +13,44 @@ For every chunk we:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
 from copy import deepcopy
 from pathlib import Path
-from typing import Iterator, List, Tuple
+from typing import List, Sequence, Tuple
 
 
-def stream_json_array(path: Path) -> Iterator[list]:
-    decoder = json.JSONDecoder()
-    with path.open("r", encoding="utf-8") as fh:
-        buffer = ""
-        opened = False
-        while True:
-            chunk = fh.read(1 << 20)
-            if not chunk:
-                break
-            buffer += chunk
-            while True:
-                buffer = buffer.lstrip()
-                if not buffer:
-                    break
-                head = buffer[0]
-                if not opened:
-                    if head != "[":
-                        raise ValueError(f"{path} must start with '['")
-                    opened = True
-                    buffer = buffer[1:]
-                    continue
-                if head == ",":
-                    buffer = buffer[1:]
-                    continue
-                if head == "]":
-                    return
-                try:
-                    obj, idx = decoder.raw_decode(buffer)
-                except json.JSONDecodeError:
-                    break
-                yield obj
-                buffer = buffer[idx:]
-        buffer = buffer.lstrip()
-        if buffer and buffer[0] != "]":
-            raise ValueError(f"{path} JSON array did not terminate properly")
-
-
-def save_json(path: Path, obj) -> None:
+def save_json(path: Path, obj, *, return_hash: bool = False):
     path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(obj, separators=(",", ":"))
     with path.open("w", encoding="utf-8") as fh:
-        json.dump(obj, fh, separators=(",", ":"))
+        fh.write(serialized)
+    if return_hash:
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return None
 
 
 def ensure_symlink(target: Path, link_path: Path) -> None:
     link_path.parent.mkdir(parents=True, exist_ok=True)
     rel = os.path.relpath(target, link_path.parent)
     if link_path.exists() or link_path.is_symlink():
-        try:
-            current = os.readlink(link_path)
-            if current == rel:
-                return
-        except OSError:
-            pass
-        link_path.unlink()
+        if link_path.is_symlink():
+            try:
+                current = os.readlink(link_path)
+                if current == rel:
+                    return
+            except OSError:
+                pass
+            link_path.unlink()
+        else:
+            raise RuntimeError(
+                f"{link_path} exists and is not a symlink; "
+                "refusing to overwrite to keep download/ clean"
+            )
     os.symlink(rel, link_path)
 
 
@@ -161,6 +136,51 @@ def resolve_dataset_path(name: str, data_dir: Path) -> Path:
     return path.resolve()
 
 
+def load_dataset_rows(path: Path) -> List[Sequence[float]]:
+    with path.open("r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if not isinstance(payload, list):
+        raise ValueError(f"{path} must contain a top-level JSON array")
+    rows: List[Sequence[float]] = []
+    for idx, row in enumerate(payload):
+        if not isinstance(row, list):
+            raise ValueError(f"{path} row {idx} is not an array")
+        if len(row) != 6:
+            raise ValueError(f"{path} row {idx} must contain 6 fields (got {len(row)})")
+        rows.append(row)
+    return rows
+
+
+def build_dataset_metadata(name: str, path: Path, rows: List[Sequence[float]], usable: int):
+    total = len(rows)
+    dropped = total - usable
+    first_ts = rows[0][0] if rows else None
+    last_ts = rows[usable - 1][0] if usable > 0 else None
+    return {
+        "name": name,
+        "path": str(path),
+        "total_candles": total,
+        "usable_candles": usable,
+        "dropped_tail": max(0, dropped),
+        "first_timestamp": first_ts,
+        "last_usable_timestamp": last_ts,
+    }
+
+
+def prune_stale_chunk_links(download_dir: Path) -> int:
+    removed = 0
+    for entry in download_dir.glob("*_chunk*.json"):
+        if not entry.is_symlink():
+            continue
+        target = entry.resolve(strict=False)
+        if not target.exists():
+            entry.unlink()
+            removed += 1
+    if removed:
+        print(f"[info] removed {removed} stale chunk symlinks from {download_dir}")
+    return removed
+
+
 def main():
     args = parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -177,6 +197,8 @@ def main():
     out_root = args.output.resolve()
     data_root = out_root / "data"
     download_dir = args.data_dir.resolve()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    prune_stale_chunk_links(download_dir)
     sim_bin = args.sim_bin.resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     data_root.mkdir(parents=True, exist_ok=True)
@@ -185,85 +207,114 @@ def main():
     start_idx = max(0, args.start)
     max_chunks = args.max_chunks if args.max_chunks is None or args.max_chunks > 0 else None
 
-    streams = [stream_json_array(path) for _, path in datasets]
-    buffers = [[] for _ in datasets]
-    eof = [False for _ in datasets]
-    chunk_idx = 0
+    dataset_rows: List[List[Sequence[float]]] = []
+    for name, path in datasets:
+        rows = load_dataset_rows(path)
+        if not rows:
+            raise RuntimeError(f"{path} contains no candles")
+        dataset_rows.append(rows)
+
+    usable_len = min(len(rows) for rows in dataset_rows)
+    if usable_len == 0:
+        raise RuntimeError("datasets share no overlapping candles")
+    if any(len(rows) != usable_len for rows in dataset_rows):
+        for (name, path), rows in zip(datasets, dataset_rows):
+            extra = len(rows) - usable_len
+            if extra > 0:
+                print(
+                    f"[warn] trimming {extra} candles from tail of {name} ({path}) "
+                    f"to match shortest dataset"
+                )
+
+    total_chunks = math.ceil(usable_len / chunk_size)
+    if total_chunks == 0 or start_idx >= total_chunks:
+        raise RuntimeError(
+            f"start index {start_idx} is beyond available chunk windows ({total_chunks})"
+        )
+
+    dataset_meta = [
+        build_dataset_metadata(name, path, rows, usable_len)
+        for (name, path), rows in zip(datasets, dataset_rows)
+    ]
+
     emitted = 0
-
-    while True:
-        for j, stream in enumerate(streams):
-            while len(buffers[j]) < chunk_size and not eof[j]:
-                try:
-                    buffers[j].append(next(stream))
-                except StopIteration:
-                    eof[j] = True
-                    break
-        if all(eof) and all(len(buf) == 0 for buf in buffers):
-            break
-        if any(len(buf) == 0 for buf in buffers) and not all(eof):
-            raise RuntimeError("datasets have mismatched lengths; cannot chunk evenly")
-
-        if chunk_idx >= start_idx:
-            chunk_id = chunk_idx
-            chunk_name = f"chunk{chunk_id:05d}"
-            chunk_dir = out_root / chunk_name
-            if chunk_dir.exists():
-                if args.force:
-                    shutil.rmtree(chunk_dir)
-                else:
-                    raise RuntimeError(f"{chunk_dir} already exists (use --force)")
-            chunk_dir.mkdir(parents=True, exist_ok=True)
-
-            chunk_dataset_entries: List[Tuple[str, Path]] = []
-            for (dataset_name, _), payload in zip(datasets, buffers):
-                payload = list(payload)
-                chunk_base = f"{dataset_name}_chunk{chunk_id:05d}"
-                chunk_path = data_root / f"{chunk_base}.json"
-                save_json(chunk_path, payload)
-                chunk_dataset_entries.append((chunk_base, chunk_path))
-                link_path = download_dir / f"{chunk_base}.json"
-                ensure_symlink(chunk_path, link_path)
-
-            chunk_cfg_entry = deepcopy(template_cfg)
-            chunk_cfg = {
-                "configuration": [chunk_cfg_entry],
-                "datafile": [entry for entry, _ in chunk_dataset_entries],
-                "debug": debug_flag,
-            }
-            save_json(chunk_dir / "chunk-config.json", chunk_cfg)
-
-            metadata = {
-                "chunk": f"{chunk_id:05d}",
-                "chunk_size": chunk_size,
-                "datafiles": [
-                    {"name": entry, "path": str(path)} for entry, path in chunk_dataset_entries
-                ],
-                "source_datasets": [
-                    {"name": name, "path": str(path)} for name, path in datasets
-                ],
-            }
-            save_json(chunk_dir / "metadata.json", metadata)
-
-            if not args.skip_sim:
-                stdout_log = chunk_dir / "cpp_stdout.log"
-                result_path = chunk_dir / "results.json"
-                run_simulator(sim_bin, chunk_dir / "chunk-config.json", result_path, stdout_log)
-                extract_cppdbg(stdout_log, chunk_dir / "cpp_log.jsonl")
-
-            emitted += 1
-            if max_chunks is not None and emitted >= max_chunks:
-                break
-
-        for buf in buffers:
-            buf.clear()
-        chunk_idx += 1
-
+    for chunk_id in range(start_idx, total_chunks):
         if max_chunks is not None and emitted >= max_chunks:
             break
+        window_start = chunk_id * chunk_size
+        window_end = min(window_start + chunk_size, usable_len)
+        chunk_name = f"chunk{chunk_id:05d}"
+        chunk_dir = out_root / chunk_name
+        if chunk_dir.exists():
+            if args.force:
+                shutil.rmtree(chunk_dir)
+            else:
+                raise RuntimeError(f"{chunk_dir} already exists (use --force)")
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+
+        chunk_dataset_entries: List[Tuple[str, Path, int, int, int, str]] = []
+        datafile_names: List[str] = []
+        for (dataset_name, _), rows in zip(datasets, dataset_rows):
+            payload = rows[window_start:window_end]
+            chunk_base = f"{dataset_name}_chunk{chunk_id:05d}"
+            chunk_path = data_root / f"{chunk_base}.json"
+            chunk_hash = save_json(chunk_path, payload, return_hash=True)
+            chunk_dataset_entries.append(
+                (
+                    chunk_base,
+                    chunk_path,
+                    len(payload),
+                    payload[0][0] if payload else None,
+                    payload[-1][0] if payload else None,
+                    chunk_hash,
+                )
+            )
+            link_path = download_dir / f"{chunk_base}.json"
+            ensure_symlink(chunk_path, link_path)
+            datafile_names.append(chunk_base)
+
+        chunk_cfg_entry = deepcopy(template_cfg)
+        chunk_cfg = {
+            "configuration": [chunk_cfg_entry],
+            "datafile": datafile_names,
+            "debug": debug_flag,
+        }
+        chunk_cfg_path = chunk_dir / "chunk-config.json"
+        save_json(chunk_cfg_path, chunk_cfg)
+
+        metadata = {
+            "chunk": f"{chunk_id:05d}",
+            "chunk_size": chunk_size,
+            "window": {
+                "start_index": window_start,
+                "end_index": window_end,
+                "length": window_end - window_start,
+            },
+            "datafiles": [
+                {
+                    "name": entry,
+                    "path": str(path),
+                    "candles": count,
+                    "first_timestamp": first_ts,
+                    "last_timestamp": last_ts,
+                    "sha256": chunk_hash,
+                }
+                for (entry, path, count, first_ts, last_ts, chunk_hash) in chunk_dataset_entries
+            ],
+            "source_datasets": dataset_meta,
+        }
+        save_json(chunk_dir / "metadata.json", metadata)
+
+        if not args.skip_sim:
+            stdout_log = chunk_dir / "cpp_stdout.log"
+            result_path = chunk_dir / "results.json"
+            run_simulator(sim_bin, chunk_cfg_path, result_path, stdout_log)
+            extract_cppdbg(stdout_log, chunk_dir / "cpp_log.jsonl")
+
+        emitted += 1
 
     if emitted == 0:
-        raise RuntimeError("no chunks were generated; check dataset size/start/max settings")
+        raise RuntimeError("no chunks were generated; adjust start/max or dataset lengths")
 
 
 if __name__ == "__main__":
