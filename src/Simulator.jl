@@ -783,7 +783,7 @@ function step_for_price_3(ctx::StepContext{T}, log_trader, p_min::T, p_max::T, p
         _dy = (x0[to] - y) * fee_mul
         curve.x[to] = x0[to] - _dy
         price = from == asset_index(pair[1]) ? _dx / _dy : _dy / _dx
-        v = vol + _dy * T(log_trader.tweak.price_oracle[to])
+        v = vol + _dy * curve.p[to]
         restore_balances!(curve, x0)
         new_profit = from == asset_index(pair[1]) ?
             (_dx / price - _dx / p_max) * p_max :
@@ -817,7 +817,7 @@ function step_for_price_3(ctx::StepContext{T}, log_trader, p_min::T, p_max::T, p
             trial_dy = (x0[to] - y) * fee_mul
             curve.x[to] = x0[to] - trial_dy
             price = from == asset_index(pair[1]) ? trial_dx / trial_dy : trial_dy / trial_dx
-            v = vol + trial_dy * T(log_trader.tweak.price_oracle[to])
+            v = vol + trial_dy * curve.p[to]
             restore_balances!(curve, x0)
             new_profit = from == asset_index(pair[1]) ?
                 (trial_dx / price - trial_dx / p_max) * p_max :
@@ -1095,8 +1095,8 @@ end
         ai = asset_index(a)
         bi = asset_index(b)
         last_quote = get(lasts, trade.pair, trader.tweak.price_oracle[bi] / trader.tweak.price_oracle[ai])
-        update_price_oracle!(trader, trade)
-        trade_dt = prev_trade_ts == 0 ? zero(T) : T(trade.timestamp - prev_trade_ts)
+        dt_raw = prev_trade_ts == 0 ? Int64(0) : trade.timestamp - prev_trade_ts
+        trade_dt = dt_raw <= 0 ? zero(T) : T(dt_raw)
         vol = zero(T)
         ext_vol = T(trade.volume) * trader.tweak.price_oracle[bi]
         ctr = 0
@@ -1112,7 +1112,6 @@ end
             state, candle_id, trade, cfg, price_before, vol, ext_vol, trade_dt,
             last_quote, high_quote, ctr,
         )
-        update_price_oracle!(trader, trade.pair, last_quote)
         high_quote = last_quote
         price_before = last_quote
 
@@ -1121,27 +1120,24 @@ end
             state, candle_id, trade, cfg, price_before, vol, ext_vol, trade_dt,
             last_quote, low_quote, ctr,
         )
-        update_price_oracle!(trader, trade.pair, last_quote)
         low_quote = last_quote
 
         lasts[trade.pair] = last_quote
-        if trade.is_last
-            if trader.fees.boost_rate > 0 && trade_dt > 0
-                factor = apply_boost!(trader.curve, trade_dt, trader.fees.boost_rate)
-                trader.profit.xcp_profit_real *= factor
-                trader.profit.xcp *= factor
-            end
-            midpoint = (high_quote + low_quote) / T(2)
-            tweak_price!(trader, trade.timestamp, trade.pair, midpoint)
-            Instr.log_tweak_event(state.debug.logger, 0, trade.candle_index, trade, midpoint, high_quote, low_quote, trader)
-            trader.metrics_state.total_vol += vol
-            elapsed = max(Int64(1), trade.timestamp - start_timestamp + 1)
-            ARU_x = trader.profit.xcp_profit_real
-            ARU_y = (T(86400) * T(365)) / T(elapsed)
-            trader.profit.APY = ARU_x^ARU_y - one(T)
-            Metrics.set_apy!(state.metrics, trader.profit.APY)
-            prev_trade_ts = trade.timestamp
+        if trader.fees.boost_rate > 0 && trade_dt > 0
+            factor = apply_boost!(trader.curve, trade_dt, trader.fees.boost_rate)
+            trader.profit.xcp_profit_real *= factor
+            trader.profit.xcp *= factor
         end
+        midpoint = (high_quote + low_quote) / T(2)
+        tweak_price!(trader, trade.timestamp, trade.pair, midpoint)
+        Instr.log_tweak_event(state.debug.logger, 0, trade.candle_index, trade, midpoint, high_quote, low_quote, trader)
+        trader.metrics_state.total_vol += vol
+        elapsed = max(Int64(1), trade.timestamp - start_timestamp + 1)
+        ARU_x = trader.profit.xcp_profit_real
+        ARU_y = (T(86400) * T(365)) / T(elapsed)
+        trader.profit.APY = ARU_x^ARU_y - one(T)
+        Metrics.set_apy!(state.metrics, trader.profit.APY)
+        prev_trade_ts = trade.timestamp
     end
     return state
 end
