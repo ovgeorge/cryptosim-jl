@@ -10,6 +10,26 @@ The `data/` entry in this tree is a symbolic link to `/home/george/data`. Treat 
 
 * `scripts/capture_chunks.sh` – capture a few `trimXXXXX` chunks from the C++ simulator (defaults to Curve's 2-coin config).
 * `scripts/generate_chunks.py` – batch-produce chunk fixtures from a raw dataset while running both C++ solvers.
+* `scripts/generate_chunks_parallel.py` – fan out the sequential generator across all CPU cores so chunk production (and simulator runs) stay fully saturated.
 * `scripts/run_parity_parallel.sh` – run `chunk_summary.jl` for every chunk directory (works with `gnu parallel`).
 
 See `reports/` for current divergence notes and diagnostic dumps.
+
+## Parallel chunk generation
+
+Use `scripts/generate_chunks_parallel.py` whenever you need to materialize a large chunk set (for example, 100-candle windows from everything stored under `data/`). The wrapper keeps invoking `scripts/generate_chunks.py` under the hood but splits the work into contiguous ranges and automatically launches one worker per hardware thread—**we always want to use every core, always**. Override `--jobs` only when you explicitly need to throttle a run (such as on a shared box).
+
+Example:
+
+```bash
+python scripts/generate_chunks_parallel.py \
+  --dataset data/ethusdt-1m.json.gz \
+  --config configs/ethusdt_chunk_config.json \
+  --output artifacts/chunks_ethusdt-1m_100 \
+  --chunk-size 100 \
+  --instrumented-sim cryptopool-simulator/simu \
+  --chunks-per-job 256 \
+  --force
+```
+
+The gold solver is optional for now (pass `--gold-sim` once you have the pristine binary) and must never point to the same executable as `--instrumented-sim`.

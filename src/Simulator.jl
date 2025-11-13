@@ -1113,7 +1113,7 @@ end
             last_quote, high_quote, ctr,
         )
         high_quote = last_quote
-        price_before = last_quote
+        price_before = current_price(trader, trade.pair)
 
         cfg = LegConfig(:dir2, min_price_env, zero(T), bi, ai, ai, bi, max_price_env, min_price_env, false, true)
         vol, last_quote, low_quote, ctr = maybe_execute_leg!(

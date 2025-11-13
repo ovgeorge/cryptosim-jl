@@ -43,7 +43,8 @@ def sha256_bytes(payload: bytes) -> str:
 
 
 def open_text(path: Path):
-    if path.suffix == ".gz":
+    path = Path(path)
+    if ".gz" in path.suffixes:
         import gzip
 
         return gzip.open(path, "rt", encoding="utf-8")
@@ -194,8 +195,8 @@ def parse_args():
     parser.add_argument(
         "--gold-sim",
         type=Path,
-        default=Path("gold-standard/cryptopool-simulator/simu"),
-        help="Path to the pristine C++ binary",
+        default=None,
+        help="Path to the pristine C++ binary (omit if unavailable)",
     )
     parser.add_argument(
         "--instrumented-sim",
@@ -241,7 +242,7 @@ def main():
     chunks_root = out_root
 
     project_root = Path(__file__).resolve().parents[1]
-    gold_repo = args.gold_sim.resolve().parent
+    gold_repo = args.gold_sim.resolve().parent if args.gold_sim else None
     instrumented_repo = args.instrumented_sim.resolve().parent
 
     dataset_name = infer_dataset_name(dataset_path)
@@ -256,11 +257,11 @@ def main():
         except Exception:
             return "unknown"
 
-    gold_commit = safe_git_commit(gold_repo)
+    gold_commit = safe_git_commit(gold_repo) if gold_repo else None
     instrumented_commit = safe_git_commit(instrumented_repo)
     project_commit = safe_git_commit(project_root)
 
-    gold_sha = sha256_file(args.gold_sim.resolve())
+    gold_sha = sha256_file(args.gold_sim.resolve()) if args.gold_sim else None
     instrumented_sha = sha256_file(args.instrumented_sim.resolve())
 
     out_root.mkdir(parents=True, exist_ok=True)
@@ -297,6 +298,20 @@ def main():
         chunk_cfg_path = chunk_dir / "chunk-config.json"
         save_json(chunk_cfg_path, cfg)
 
+        binaries = {
+            "instrumented": {
+                "path": str(args.instrumented_sim),
+                "commit": instrumented_commit,
+                "sha256": instrumented_sha,
+            },
+        }
+        if args.gold_sim:
+            binaries["gold"] = {
+                "path": str(args.gold_sim),
+                "commit": gold_commit,
+                "sha256": gold_sha,
+            }
+
         metadata = {
             "chunk": chunk_id,
             "chunk_index": chunk_idx,
@@ -319,26 +334,21 @@ def main():
                 "timestamp": now,
                 "project_commit": project_commit,
             },
-            "binaries": {
-                "gold": {"path": str(args.gold_sim), "commit": gold_commit, "sha256": gold_sha},
-                "instrumented": {
-                    "path": str(args.instrumented_sim),
-                    "commit": instrumented_commit,
-                    "sha256": instrumented_sha,
-                },
-            },
+            "binaries": binaries,
         }
         metadata_path = chunk_dir / "metadata.json"
         save_json(metadata_path, metadata)
 
-        for repo in (gold_repo, instrumented_repo):
+        for repo in filter(None, (gold_repo, instrumented_repo)):
             link = repo / "download" / f"{chunk_name}.json"
             ensure_symlink(chunk_data_path, link)
 
         if not args.skip_sim:
-            gold_result = chunk_dir / "results.gold.json"
-            gold_log = chunk_dir / "cpp_stdout.gold.log"
-            run_simu(args.gold_sim.resolve(), chunk_cfg_path, gold_result, gold_log)
+            gold_result = None
+            if args.gold_sim:
+                gold_result = chunk_dir / "results.gold.json"
+                gold_log = chunk_dir / "cpp_stdout.gold.log"
+                run_simu(args.gold_sim.resolve(), chunk_cfg_path, gold_result, gold_log)
 
             instrumented_result = chunk_dir / "results.instrumented.json"
             inst_log = chunk_dir / "cpp_stdout.instrumented.log"
@@ -363,7 +373,8 @@ def main():
                 trace_result.unlink()
             except FileNotFoundError:
                 pass
-            copy_json(gold_result, chunk_dir / "results.json")
+            copy_source = gold_result if gold_result else instrumented_result
+            copy_json(copy_source, chunk_dir / "results.json")
 
         generated.append(chunk_id)
 

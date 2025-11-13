@@ -184,7 +184,12 @@ function _parse_candles(io::IO, pair::Tuple{Int,Int}, label::AbstractString)
     candles = Vector{Candle}(undef, length(rows))
     @inbounds for (idx, row) in enumerate(rows)
         rowlen = length(row)
-        rowlen == 6 || error("candle row $(idx) in $(label) must contain 6 entries (got $(rowlen))")
+        if rowlen == 12
+            # Binance-style candles include close time, quote volume, trade count, taker volumes, etc.
+            # We only need the OHLCV slice, so ignore the remaining fields.
+        elseif rowlen != 6
+            error("candle row $(idx) in $(label) must contain 6 or 12 entries (got $(rowlen))")
+        end
         ts = _normalize_timestamp(row[1], label, idx)
         open_ = _coerce_float(row[2], label, idx, "open")
         high = _coerce_float(row[3], label, idx, "high")
@@ -203,6 +208,16 @@ end
     elseif val isa AbstractFloat
         isfinite(val) || error("candle row $(idx) in $(label) has non-finite timestamp")
         Int64(round(Int, val))
+    elseif val isa AbstractString
+        stripped = strip(val)
+        isempty(stripped) && error("candle row $(idx) in $(label) has empty timestamp string")
+        parsed = try
+            parse(Float64, stripped)
+        catch err
+            error("candle row $(idx) in $(label) has invalid timestamp string: $(err)")
+        end
+        isfinite(parsed) || error("candle row $(idx) in $(label) has non-finite timestamp string")
+        Int64(round(Int, parsed))
     else
         error("candle row $(idx) in $(label) has invalid timestamp type $(typeof(val))")
     end
@@ -213,6 +228,15 @@ end
     val === nothing && error("candle row $(idx) in $(label) is missing $(field)")
     if val isa Real
         return Float64(val)
+    elseif val isa AbstractString
+        stripped = strip(val)
+        isempty(stripped) && error("candle row $(idx) in $(label) has empty $(field) string")
+        parsed = try
+            parse(Float64, stripped)
+        catch err
+            error("candle row $(idx) in $(label) has invalid $(field) string: $(err)")
+        end
+        return parsed
     else
         error("candle row $(idx) in $(label) has non-numeric $(field)")
     end
