@@ -2,6 +2,12 @@
 
 This repository contains the Julia reimplementation of the Curve CryptoPool simulator alongside a vendored copy of the original C++ solver under `cryptopool-simulator/`.
 
+## Current Parity Baseline
+
+The best-to-date Julia ⇄ C++ parity snapshot (2,148 chunks from `data/ethusdt-1m-full.json.gz`) is captured in `reports/ethusdt_full_parity_summary.md`. Treat those quantiles as the minimum acceptable quality bar—future code changes must not degrade those relative errors without an explicit justification and updated report.
+
+Run `scripts/full_parity_report.sh` for a full “fire-and-forget” sweep: it calls the GNU-parallel runner to resummarize every chunk under `artifacts/chunks_ethusdt-1m-full/`, overwrites `reports/ethusdt_full_chunk_summary.jsonl`, and then invokes `scripts/parity_quantiles.jl` to print the quantile table. Both scripts are argument-free by default; override `CHUNK_ROOT`, `DATA_DIR`, `OUTPUT_PATH`, or `JOBS` via environment variables when needed.
+
 ## Data layout
 
 The `data/` entry in this tree is a symbolic link to `/home/george/data`. Treat it as read-only: do not dump generated fixtures, decompressed candles, or any other throwaway artifacts there. Instead use `artifacts/` (ignored by git) for derived data such as decompressed candle feeds, chunk JSON files, and logs.

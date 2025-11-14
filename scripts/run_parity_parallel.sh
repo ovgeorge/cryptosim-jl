@@ -48,7 +48,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#CHUNKS[@]} -eq 0 ]]; then
-    mapfile -t CHUNKS < <(find "$DEFAULT_CHUNK_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+    while IFS= read -r entry; do
+        [[ $entry == chunk* ]] || continue
+        CHUNKS+=("$entry")
+    done < <(find "$DEFAULT_CHUNK_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
 fi
 
 if [[ ${#CHUNKS[@]} -eq 0 ]]; then

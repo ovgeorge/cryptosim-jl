@@ -271,6 +271,34 @@ static inline void log_preleg_event(int config,
     ev["last_price"] = vec_to_json(last_price);
     cppdbg_emit(ev);
 }
+
+static inline void log_preleg_limit_event(int config,
+                                          int candle_index,
+                                          u64 timestamp,
+                                          std::pair<int,int> pair,
+                                          const char *stage,
+                                          money price_before,
+                                          money limit_low,
+                                          money limit_high,
+                                          money volume_before,
+                                          money ext_vol,
+                                          const char *reason) {
+    if (!cpp_trade_debug_enabled()) return;
+    nlohmann::json ev;
+    ev["event"] = "PRELEG_LIMIT";
+    ev["config"] = config;
+    ev["candle_index"] = candle_index;
+    ev["timestamp"] = timestamp;
+    ev["pair"] = {pair.first, pair.second};
+    ev["stage"] = stage;
+    ev["price_before"] = price_before;
+    ev["limit_low"] = limit_low;
+    ev["limit_high"] = limit_high;
+    ev["volume_before"] = volume_before;
+    ev["ext_vol"] = ext_vol;
+    ev["reason"] = reason;
+    cppdbg_emit(ev);
+}
 static inline void log_tweak_event(int config,
                                    int candle_index,
                                    u64 timestamp,
@@ -1755,11 +1783,16 @@ struct Trader {
             money _dx = 0;
             auto p_before = N == 3 ? price_3(a, b) : price_2(a, b);
 
-            if ((max_price != 0) && (max_price > p_before)) {
-                // PRELEG snapshot for DIR1
-                log_preleg_event(simdata->num, (int)i, d.t, d.pair1, "DIR1",
-                                 p_before, 0, max_price, vol, ext_vol, (int)N,
-                                 this->curve.x, this->curve.p, this->price_oracle, this->last_price);
+            bool dir1_limit_valid = (max_price != 0) && (max_price > p_before);
+            // PRELEG snapshot for DIR1 (always emit for parity)
+            log_preleg_event(simdata->num, (int)i, d.t, d.pair1, "DIR1",
+                             p_before, 0, max_price, vol, ext_vol, (int)N,
+                             this->curve.x, this->curve.p, this->price_oracle, this->last_price);
+            if (!dir1_limit_valid) {
+                log_preleg_limit_event(simdata->num, (int)i, d.t, d.pair1, "DIR1",
+                                       p_before, 0, max_price, vol, ext_vol,
+                                       "price_before >= p_max");
+            } else {
                 auto step = N == 3 ? step_for_price_3(0, max_price, d.pair1, vol, ext_vol) : step_for_price_2(0, max_price, d.pair1, vol, ext_vol);
                 // STEP event (DIR1)
                 log_step_event(simdata->num, (int)i, d.t, d.pair1, "DIR1",
@@ -1808,11 +1841,16 @@ struct Trader {
             _dx = 0;
             p_before = p_after;
 
-            if ((min_price != 0) && (min_price < p_before)) {
-                // PRELEG snapshot for DIR2
-                log_preleg_event(simdata->num, (int)i, d.t, d.pair1, "DIR2",
-                                 p_before, min_price, 0, vol, ext_vol, (int)N,
-                                 this->curve.x, this->curve.p, this->price_oracle, this->last_price);
+            bool dir2_limit_valid = (min_price != 0) && (min_price < p_before);
+            // PRELEG snapshot for DIR2 (always emit for parity)
+            log_preleg_event(simdata->num, (int)i, d.t, d.pair1, "DIR2",
+                             p_before, min_price, 0, vol, ext_vol, (int)N,
+                             this->curve.x, this->curve.p, this->price_oracle, this->last_price);
+            if (!dir2_limit_valid) {
+                log_preleg_limit_event(simdata->num, (int)i, d.t, d.pair1, "DIR2",
+                                       p_before, min_price, 0, vol, ext_vol,
+                                       "price_before <= p_min");
+            } else {
                 auto step = N == 3 ? step_for_price_3(min_price, 0, d.pair1, vol, ext_vol) : step_for_price_2(min_price, 0, d.pair1, vol, ext_vol);
                 // STEP event (DIR2)
                 log_step_event(simdata->num, (int)i, d.t, d.pair1, "DIR2",

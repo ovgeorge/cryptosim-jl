@@ -4,18 +4,16 @@ module CryptoSim
 include("DataIO.jl")
 include("Preprocessing.jl")
 include("Metrics.jl")
-include("Tweaks.jl")
 include("Simulator.jl")
 include("CLI.jl")
 
 using .DataIO
 using .Preprocessing
-using .Tweaks
 using .Metrics
 using .Simulator
 using .CLI
 
-export DataIO, Preprocessing, Simulator, Tweaks, Metrics, CLI, run_cli
+export DataIO, Preprocessing, Simulator, Metrics, CLI, run_cli
 
 """
     run_cli(args=Base.ARGS)

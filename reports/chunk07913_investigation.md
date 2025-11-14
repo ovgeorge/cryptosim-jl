@@ -16,7 +16,7 @@ Status: ✅ Confirmed. `cryptopool-simulator/download/ethusdt-1m_chunk07913.json
 
 ## 3. Simulator internals
 - **State initialization**: Compare Julia`s `SimulationState`/`Trader` setup (fees, tweak state, `D0`, `xcp`) with the C++ constructor path in `main-stableswap.cpp`. Ensure we copy the initial oracle prices from `price_vector_from_cpp_trades`.
-- **Oracle & MA updates**: Walk through `Tweaks.jl` (e.g., `update_oracle!`, `ma_half_time` handling, `adjustment_step`) and align with the corresponding logic in `cryptopool-simulator/main-stableswap.cpp` / `stableswap.cpp`. Since chunk07913 diverges in `price_before`, focus on: `geometric_mean*`, `get_p` helpers, and any `Double64` -> `Float64` casts that might zero-out tweak state.
+- **Oracle & MA updates**: Walk through the tweak/oracle helpers inside `src/Simulator.jl` (e.g., `update_price_oracle!`, `ma_half_time` handling, `adjustment_step`) and align with the corresponding logic in `cryptopool-simulator/main-stableswap.cpp` / `stableswap.cpp`. Since chunk07913 diverges in `price_before`, focus on: `geometric_mean*`, `get_p` helpers, and any `Double64` -> `Float64` casts that might zero-out tweak state.
 - **Boost / fee adjustments**: Review `apply_boost!`, `update_fee_gamma`, gas fee handling and compare with the C++ `apply_tweak`/`do_trade` flows. Mismatched toggles (e.g., `log` flag, `heavy_tx` heuristics) could inflate slippage.
 - **Exchange functions**: Trace `exchange2!` / `exchange3!`, `solve_D`, `solve_x`, and related invariants to ensure we mirror the C++ solver’s branch conditions (especially early exits, iteration caps, and `price_oracle` usage).
 
