@@ -10,7 +10,7 @@ using JSON3
 using Printf
 
 const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
-const REPORT_PATH = normpath(joinpath(PROJECT_ROOT, "reports", "ethusdt_full_chunk_summary.jsonl"))
+const DEFAULT_REPORT_PATH = normpath(joinpath(PROJECT_ROOT, "reports", "ethusdt_full_chunk_summary.jsonl"))
 const METRIC_NAMES = (:volume, :slippage, :liquidity_density, :apy)
 const QUANTILES = (0.5, 0.75, 0.9, 0.95, 0.99, 0.999)
 
@@ -69,15 +69,16 @@ function print_table(values, worst, total_chunks::Int)
 end
 
 function main()
-    isfile(REPORT_PATH) || error("Summary file $(REPORT_PATH) not found. Run scripts/full_parity_report.sh first.")
+    report_path = length(ARGS) >= 1 ? abspath(ARGS[1]) : DEFAULT_REPORT_PATH
+    isfile(report_path) || error("Summary file $(report_path) not found. Run scripts/full_parity_report.sh first.")
     results = Vector{Dict{String,Any}}()
-    open(REPORT_PATH, "r") do io
+    open(report_path, "r") do io
         for line in eachline(io)
             isempty(strip(line)) && continue
             push!(results, JSON3.read(line, Dict{String,Any}))
         end
     end
-    isempty(results) && error("No rows found in $(REPORT_PATH)")
+    isempty(results) && error("No rows found in $(report_path)")
     values, worst, log_ok = build_metric_tables(results)
     println("Chunk logs matching C++: $(log_ok)/$(length(results))")
     print_table(values, worst, length(results))
