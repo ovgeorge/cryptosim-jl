@@ -15,7 +15,7 @@ echo "[full-parity] jobs       : ${JOBS}"
 echo "[full-parity] output     : ${OUTPUT_PATH}"
 echo "[full-parity] sample size: ${SAMPLE_CHUNKS}"
 
-mapfile -t ALL_CHUNKS < <(find "${CHUNK_ROOT}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+mapfile -t ALL_CHUNKS < <(find "${CHUNK_ROOT}" -mindepth 1 -maxdepth 1 -type d -name 'chunk*' -printf '%f\n' | sort)
 if [[ ${#ALL_CHUNKS[@]} -eq 0 ]]; then
     echo "No chunk directories under ${CHUNK_ROOT}" >&2
     exit 1
