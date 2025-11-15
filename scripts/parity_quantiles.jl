@@ -28,7 +28,7 @@ end
 
 function build_metric_tables(results)
     values = Dict(name => Float64[] for name in METRIC_NAMES)
-    worst = Dict(name => (chunk = "", rel = 0.0, abs = -Inf))
+    worst = Dict(name => (chunk = "", rel = 0.0, abs = -Inf) for name in METRIC_NAMES)
     log_ok = 0
     for result in results
         log_ok += result["log_ok"] ? 1 : 0
@@ -74,7 +74,7 @@ function main()
     open(REPORT_PATH, "r") do io
         for line in eachline(io)
             isempty(strip(line)) && continue
-            push!(results, JSON3.read(line))
+            push!(results, JSON3.read(line, Dict{String,Any}))
         end
     end
     isempty(results) && error("No rows found in $(REPORT_PATH)")

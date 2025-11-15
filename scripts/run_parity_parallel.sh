@@ -71,7 +71,8 @@ run_chunk() {
 export -f run_chunk
 
 if [[ -n "$OUTPUT_PATH" ]]; then
-    parallel --jobs "$JOBS" --tag --line-buffer run_chunk ::: "${CHUNKS[@]}" | tee "$OUTPUT_PATH"
+    parallel --jobs "$JOBS" --tag --line-buffer run_chunk ::: "${CHUNKS[@]}" \
+        | tee >(sed 's/^[^\t]*\t//' > "$OUTPUT_PATH")
 else
     parallel --jobs "$JOBS" --tag --line-buffer run_chunk ::: "${CHUNKS[@]}"
 fi
