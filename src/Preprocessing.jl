@@ -3,6 +3,7 @@ module Preprocessing
 using JSON3
 
 using ..DataIO: Candle, CPPTrade, split_leg_extrema
+using ..DomainTypes: TradePair
 
 export SplitTrade, split_candles, adapt_trades
 
@@ -23,7 +24,7 @@ struct SplitTrade
     volume::Float64
     orig_volume::Float64
     cap_volume::Float64
-    pair::Tuple{Int,Int}
+    pair::TradePair
     is_last::Bool
     orig_high::Float64
     orig_low::Float64
@@ -49,7 +50,7 @@ end
 
 # -- internal helpers ---------------------------------------------------------
 
-@inline function pair_offset(pair::Tuple{Int,Int})
+@inline function pair_offset(pair::TradePair)
     return (pair[1] + pair[2]) * 10
 end
 

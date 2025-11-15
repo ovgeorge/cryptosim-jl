@@ -21,6 +21,10 @@ The `data/` entry in this tree is a symbolic link to `/home/george/data`. Treat 
 
 See `reports/` for current divergence notes and diagnostic dumps.
 
+## Tests
+
+Run `julia --project=. test/runtests.jl` to execute lightweight sanity checks covering chunk path validation and simulator initialization. These tests ensure the refactored core modules load correctly before running heavier parity sweeps.
+
 ## Parallel chunk generation
 
 Use `scripts/generate_chunks_parallel.py` whenever you need to materialize a large chunk set (for example, 100-candle windows from everything stored under `data/`). The wrapper keeps invoking `scripts/generate_chunks.py` under the hood but splits the work into contiguous ranges and automatically launches one worker per hardware thread—**we always want to use every core, always**. Override `--jobs` only when you explicitly need to throttle a run (such as on a shared box).

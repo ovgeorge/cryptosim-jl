@@ -1,19 +1,23 @@
 module CryptoSim
 
 # Top-level exports for the Julia rewrite.
+include("DomainTypes.jl")
 include("DataIO.jl")
 include("Preprocessing.jl")
 include("Metrics.jl")
+include("ChunkLoader.jl")
 include("Simulator.jl")
 include("CLI.jl")
 
+using .DomainTypes
 using .DataIO
 using .Preprocessing
 using .Metrics
+using .ChunkLoader
 using .Simulator
 using .CLI
 
-export DataIO, Preprocessing, Simulator, Metrics, CLI, run_cli
+export DomainTypes, DataIO, Preprocessing, ChunkLoader, Simulator, Metrics, CLI, run_cli
 
 """
     run_cli(args=Base.ARGS)

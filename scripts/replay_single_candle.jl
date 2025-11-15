@@ -26,6 +26,7 @@ using .CryptoSim
 
 const Sim = CryptoSim.Simulator
 const DataIO = CryptoSim.DataIO
+const Domain = CryptoSim.DomainTypes
 
 struct Args
     chunk::String
@@ -80,14 +81,13 @@ function find_leg_event(path::AbstractString; stage::String, timestamp::Union{No
     return nothing
 end
 
-function load_config_for_chunk(chunk_dir::AbstractString)
-    cfg_path = joinpath(chunk_dir, "chunk-config.json")
-    if isfile(cfg_path)
-        return DataIO.load_config(cfg_path)
+function load_config_for_chunk(paths::Domain.ChunkPaths)
+    if isfile(paths.chunk_config)
+        return DataIO.load_config(paths.chunk_config)
     else
-        meta = JSON3.read(open(joinpath(chunk_dir, "metadata.json"), "r") do io; read(io, String); end)
+        meta = JSON3.read(open(paths.metadata, "r") do io; read(io, String); end)
         copied = haskey(meta, "config") ? String(meta["config"]) : "single-run.json"
-        return DataIO.load_config(joinpath(chunk_dir, copied))
+        return DataIO.load_config(joinpath(paths.dir, copied))
     end
 end
 
@@ -178,13 +178,13 @@ end
 function main()
     args = parse_args()
     root = normpath(joinpath(@__DIR__, ".."))
-    chunk_dir = normpath(joinpath(root, "test", "fixtures", "chunks", args.chunk))
-    isdir(chunk_dir) || error("Chunk directory not found: $(chunk_dir)")
-    cfg_file = load_config_for_chunk(chunk_dir)
+    chunk_root = normpath(joinpath(root, "test", "fixtures", "chunks"))
+    paths = Domain.ChunkPaths(chunk_root, args.chunk)
+    cfg_file = load_config_for_chunk(paths)
     cfg = cfg_file.configurations[1]
     # Find step events in both logs
-    jlog = joinpath(chunk_dir, "julia_log.$(args.chunk).jsonl")
-    clog = joinpath(chunk_dir, "cpp_log.jsonl")
+    jlog = Domain.default_julia_log_path(paths)
+    clog = paths.cpp_log
     isfile(jlog) || error("Julia log not found: $(jlog)")
     isfile(clog) || error("C++ log not found: $(clog)")
     # Use LEG events to reconstruct snapshots and inputs
