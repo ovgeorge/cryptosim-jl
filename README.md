@@ -6,7 +6,9 @@ This repository contains the Julia reimplementation of the Curve CryptoPool simu
 
 The best-to-date Julia ⇄ C++ parity snapshot (2,148 chunks from `data/ethusdt-1m-full.json.gz`) is captured in `reports/ethusdt_full_parity_summary.md`. Treat those quantiles as the minimum acceptable quality bar—future code changes must not degrade those relative errors without an explicit justification and updated report.
 
-Run `scripts/full_parity_report.sh` for a full “fire-and-forget” sweep: it calls the GNU-parallel runner to resummarize every chunk under `artifacts/chunks_ethusdt-1m-full/`, overwrites `reports/ethusdt_full_chunk_summary.jsonl`, and then invokes `scripts/parity_quantiles.jl` to print the quantile table. Both scripts are argument-free by default; override `CHUNK_ROOT`, `DATA_DIR`, `OUTPUT_PATH`, or `JOBS` via environment variables when needed.
+Run `scripts/full_parity_report.sh` for a full “fire-and-forget” sweep: it calls the GNU-parallel runner to resummarize every chunk under `artifacts/chunks_ethusdt-1m-full/`, overwrites `reports/ethusdt_full_chunk_summary.jsonl`, and then invokes `scripts/parity_quantiles.jl` to print the quantile table **and regenerate the Markdown snapshot**. Both scripts are argument-free by default; override `CHUNK_ROOT`, `DATA_DIR`, `OUTPUT_PATH`, `REPORT_MARKDOWN`, or `JOBS` via environment variables when needed. The report helper also accepts provenance overrides (`--dataset`, `--dataset-sha`, `--runner`, `--note`, etc.) so every markdown refresh clearly records which dataset/chunk root and command produced it.
+
+Each JSONL row emitted by `scripts/chunk_summary.jl` now carries structured metadata (config SHA256, chunk size, trim flag, source datasets, and CLI options). Downstream tooling—`scripts/parity_quantiles.jl`, the markdown renderer, and any future dashboards—consume the shared `CryptoSim.ChunkSummary` module to compute quantiles, build tables, and render documentation without reimplementing relative-error math. Under the hood these scripts go through the shared `CryptoSim.DomainTypes`/`ChunkLoader` helpers and the new `Simulator` façade that wraps the core, math, and logging modules, so any tooling you build should also just import `CryptoSim` rather than reimplementing path math or solver internals.
 
 ## Data layout
 
@@ -20,6 +22,10 @@ The `data/` entry in this tree is a symbolic link to `/home/george/data`. Treat 
 * `scripts/run_parity_parallel.sh` – run `chunk_summary.jl` for every chunk directory (works with `gnu parallel`).
 
 See `reports/` for current divergence notes and diagnostic dumps.
+
+## Tests
+
+Run `julia --project=. test/runtests.jl` to execute lightweight sanity checks covering chunk path validation and simulator initialization. These tests ensure the refactored core modules load correctly before running heavier parity sweeps.
 
 ## Parallel chunk generation
 

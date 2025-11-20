@@ -4,6 +4,7 @@ using JSON3
 using StructTypes
 
 using ...Preprocessing: SplitTrade
+using ...DomainTypes: TradePair, LegStage, leg_stage_label, DIR1, DIR2
 import ..Trader
 
 export TradeLogger, DebugOptions, default_debug_options, noop_debug_options, with_logger,
@@ -25,11 +26,11 @@ struct EventContext
     config::Int
     candle_index::Int
     timestamp::Int64
-    pair::Tuple{Int,Int}
+    pair::TradePair
 end
 
 @inline event_context(config::Int, trade::SplitTrade) =
-    EventContext(config, trade.candle_index, trade.timestamp, (trade.pair[1], trade.pair[2]))
+    EventContext(config, trade.candle_index, trade.timestamp, trade.pair)
 
 struct StepTraceConfig
     enabled::Bool
@@ -133,7 +134,7 @@ struct StepEvent{T} <: TradeEvent
     config::Int
     candle_index::Int
     timestamp::Int64
-    pair::Tuple{Int,Int}
+    pair::TradePair
     stage::String
     price_before::T
     limit_low::T
@@ -150,7 +151,7 @@ struct PreLegEvent{T} <: TradeEvent
     config::Int
     candle_index::Int
     timestamp::Int64
-    pair::Tuple{Int,Int}
+    pair::TradePair
     stage::String
     price_before::T
     limit_low::T
@@ -169,7 +170,7 @@ struct LegEvent{T} <: TradeEvent
     config::Int
     candle_index::Int
     timestamp::Int64
-    pair::Tuple{Int,Int}
+    pair::TradePair
     stage::String
     price_before::T
     price_after::T
@@ -197,7 +198,7 @@ struct TweakEvent{T} <: TradeEvent
     config::Int
     candle_index::Int
     timestamp::Int64
-    pair::Tuple{Int,Int}
+    pair::TradePair
     mode::String
     norm::T
     price_mid::T
@@ -263,7 +264,7 @@ struct PreLegLimitEvent{T} <: TradeEvent
     config::Int
     candle_index::Int
     timestamp::Int64
-    pair::Tuple{Int,Int}
+    pair::TradePair
     stage::String
     price_before::T
     limit_low::T
@@ -308,11 +309,11 @@ end
 end
 
 @inline function log_preleg_limit_event(logger::TradeLogger, config_id::Int, candle_index::Int, trade::SplitTrade,
-                                        stage::AbstractString, price_before, limit_low, limit_high,
+                                        stage, price_before, limit_low, limit_high,
                                         volume_before, ext_vol, reason::AbstractString)
-    ctx = EventContext(config_id, candle_index, trade.timestamp, (trade.pair[1], trade.pair[2]))
+    ctx = EventContext(config_id, candle_index, trade.timestamp, trade.pair)
     event = PreLegLimitEvent(
-        "PRELEG_LIMIT", ctx.config, ctx.candle_index, ctx.timestamp, ctx.pair, String(stage),
+        "PRELEG_LIMIT", ctx.config, ctx.candle_index, ctx.timestamp, ctx.pair, stage_label(stage),
         price_before, limit_low, limit_high, volume_before, ext_vol, String(reason),
     )
     emit_event(logger, event)
@@ -343,12 +344,12 @@ end
 end
 
 @inline function log_step_event(logger::TradeLogger, config_id::Int, candle_index::Int,
-                                trade::SplitTrade, stage::AbstractString,
+                                trade::SplitTrade, stage,
                                 price_before, limit_low, limit_high, dx,
                                 volume_before, ext_vol, gas_fee, pool_n)
-    ctx = EventContext(config_id, candle_index, trade.timestamp, (trade.pair[1], trade.pair[2]))
+    ctx = EventContext(config_id, candle_index, trade.timestamp, trade.pair)
     payload = StepPayload(
-        String(stage),
+        stage_label(stage),
         price_before,
         limit_low,
         limit_high,
@@ -362,12 +363,12 @@ end
 end
 
 @inline function log_leg_event(logger::TradeLogger, config_id::Int, candle_index::Int, trade::SplitTrade,
-                               stage::AbstractString, price_before, price_after,
+                               stage, price_before, price_after,
                                max_price, min_price, last_quote, dx, dy,
                                volume_delta, volume_total, ext_vol, trades, trader)
-    ctx = EventContext(config_id, candle_index, trade.timestamp, (trade.pair[1], trade.pair[2]))
+    ctx = EventContext(config_id, candle_index, trade.timestamp, trade.pair)
     payload = LegPayload(
-        String(stage),
+        stage_label(stage),
         price_before,
         price_after,
         max_price,
@@ -386,7 +387,7 @@ end
 
 @inline function log_tweak_event(logger::TradeLogger, config_id::Int, candle_index::Int,
                                  trade::SplitTrade, midpoint, high, low, trader)
-    ctx = EventContext(config_id, candle_index, trade.timestamp, (trade.pair[1], trade.pair[2]))
+    ctx = EventContext(config_id, candle_index, trade.timestamp, trade.pair)
     payload = TweakPayload(
         String(trader.tweak.last_tweak_mode),
         trader.tweak.last_tweak_norm,
@@ -400,19 +401,24 @@ end
     record_event!(logger, ctx, payload)
 end
 
+@inline stage_label(stage::LegStage) = leg_stage_label(stage)
+@inline stage_label(stage::Symbol) = uppercase(String(stage))
+@inline stage_label(stage::AbstractString) = String(stage)
+
 @inline function log_preleg_event(logger::TradeLogger, config_id::Int, candle_index::Int, trade::SplitTrade,
-                                  stage::AbstractString, price_before, limit_low, limit_high,
+                                  stage, price_before, limit_low, limit_high,
                                   volume_before, ext_vol, pool_n, trader)
-    ctx = EventContext(config_id, candle_index, trade.timestamp, (trade.pair[1], trade.pair[2]))
+    ctx = EventContext(config_id, candle_index, trade.timestamp, trade.pair)
     snap = trader_snapshot(trader)
-    record_event!(logger, ctx, String(stage), price_before, limit_low, limit_high, volume_before, ext_vol, pool_n, snap)
+    record_event!(logger, ctx, stage_label(stage), price_before, limit_low, limit_high, volume_before, ext_vol, pool_n, snap)
 end
 
 @inline function maybe_step_probe_context(debug::DebugOptions, candle_idx::Int, timestamp::Int,
-                                          pair::Tuple{Int,Int}, stage::Symbol)
+                                        pair::TradePair, stage)
     idx = debug.probe.index
     (idx !== nothing && candle_idx == idx) || return nothing
-    return (; candle = candle_idx, timestamp = timestamp, pair = pair, stage = String(stage))
+    stage_name = stage isa LegStage ? lowercase(leg_stage_label(stage)) : lowercase(String(stage))
+    return (; candle = candle_idx, timestamp = timestamp, pair = pair, stage = stage_name)
 end
 
 function emit_step_probe(debug::DebugOptions, ctx::NamedTuple, trader::Trader, from_asset::Int, to_asset::Int, dx, dy,
@@ -458,16 +464,18 @@ function emit_step_probe(debug::DebugOptions, ctx::NamedTuple, trader::Trader, f
     end
 end
 
-@inline function trace_step_iter(debug::DebugOptions, stage::Symbol, phase::Symbol, ctx::NamedTuple)
+@inline function trace_step_iter(debug::DebugOptions, stage, phase::Symbol, ctx::NamedTuple)
     cfg = debug.step_trace
     cfg.enabled || return
-    write_step_trace(cfg, merge((event = "STEP_ITER", stage = String(stage), phase = String(phase)), ctx))
+    stage_name = stage isa LegStage ? lowercase(leg_stage_label(stage)) : String(stage)
+    write_step_trace(cfg, merge((event = "STEP_ITER", stage = stage_name, phase = String(phase)), ctx))
 end
 
-@inline function trace_step_result(debug::DebugOptions, stage::Symbol, ctx::NamedTuple)
+@inline function trace_step_result(debug::DebugOptions, stage, ctx::NamedTuple)
     cfg = debug.step_trace
     cfg.enabled || return
-    write_step_trace(cfg, merge((event = "STEP_RESULT", stage = String(stage)), ctx))
+    stage_name = stage isa LegStage ? lowercase(leg_stage_label(stage)) : String(stage)
+    write_step_trace(cfg, merge((event = "STEP_RESULT", stage = stage_name), ctx))
 end
 
 @inline function trace_dir2_execution(debug::DebugOptions, ctx::NamedTuple)

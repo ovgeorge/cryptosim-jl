@@ -9,6 +9,8 @@ catch
     @eval const Double64 = Float64
 end
 
+using ..DomainTypes: TradePair
+
 const DEFAULT_DATA_DIR = normpath(joinpath(@__DIR__, "..", "cryptopool-simulator", "download"))
 
 export Candle, SimulationConfig, ConfigFile, CPPTrade, load_config, load_candles,
@@ -27,7 +29,7 @@ struct Candle
     low::Float64
     close::Float64
     volume::Float64
-    pair::Tuple{Int,Int}
+    pair::TradePair
 end
 
 """
@@ -70,7 +72,7 @@ struct CPPTrade
     orig_high::Float64
     orig_low::Float64
     is_last::Bool
-    pair::Tuple{Int,Int}
+    pair::TradePair
 end
 
 Base.@kwdef struct SimulationConfig
@@ -161,7 +163,7 @@ end
 
 Streams a Binance-style `[timestamp, "open", "high", ...]` JSON file into memory.
 """
-function load_candles(source::AbstractString; pair::Tuple{Int,Int}=(0, 1), data_dir::AbstractString=DEFAULT_DATA_DIR)
+function load_candles(source::AbstractString; pair::TradePair=(0, 1), data_dir::AbstractString=DEFAULT_DATA_DIR)
     path = _resolve_candle_path(source, data_dir)
     open(path, "r") do io
         return _parse_candles(io, pair, path)
@@ -178,7 +180,7 @@ function _resolve_candle_path(source::AbstractString, data_dir::AbstractString)
     return path
 end
 
-function _parse_candles(io::IO, pair::Tuple{Int,Int}, label::AbstractString)
+function _parse_candles(io::IO, pair::TradePair, label::AbstractString)
     rows = JSON3.read(io)
     isa(rows, AbstractVector) || error("candle payload in $(label) must be a JSON array")
     candles = Vector{Candle}(undef, length(rows))
@@ -303,7 +305,7 @@ function build_cpp_trades(cfg::ConfigFile; data_dir::AbstractString=DEFAULT_DATA
     return trades
 end
 
-function append_cpp_trades!(buf::Vector{CPPTrade}, idx::Int, candle::Candle, pair::Tuple{Int,Int})
+function append_cpp_trades!(buf::Vector{CPPTrade}, idx::Int, candle::Candle, pair::TradePair)
     offset = (pair[1] + pair[2]) * 10
     lower_ts = candle.timestamp - offset + 5
     upper_ts = candle.timestamp + offset - 5
