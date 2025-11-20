@@ -8,6 +8,8 @@ OUTPUT_PATH="${OUTPUT_PATH:-${ROOT}/reports/ethusdt_full_chunk_summary.jsonl}"
 PROJECT_PATH="${PROJECT_PATH:-${ROOT}}"
 JOBS="${JOBS:-$(nproc)}"
 SAMPLE_CHUNKS="${SAMPLE_CHUNKS:-0}" # 0 means use all chunks
+REPORT_MARKDOWN="${REPORT_MARKDOWN:-${ROOT}/reports/ethusdt_full_parity_summary.md}"
+REPORT_TITLE="${REPORT_TITLE:-Parity Snapshot}"
 
 usage() {
     cat <<USAGE
@@ -99,6 +101,7 @@ echo "[full-parity] data dir   : ${DATA_DIR}"
 echo "[full-parity] jobs       : ${JOBS}"
 echo "[full-parity] output     : ${OUTPUT_PATH}"
 echo "[full-parity] sample size: ${SAMPLE_CHUNKS}"
+echo "[full-parity] markdown   : ${REPORT_MARKDOWN}"
 
 if [[ ${#CHUNK_ARGS[@]} -gt 0 ]]; then
     CHUNKS=("${CHUNK_ARGS[@]}")
@@ -116,6 +119,30 @@ else
     fi
 fi
 
+TOTAL_AVAILABLE="${#CHUNKS[@]}"
+if [[ ${#CHUNK_ARGS[@]} -eq 0 ]]; then
+    TOTAL_AVAILABLE="${#ALL_CHUNKS[@]}"
+fi
+
+DATASET_NAME=""
+DATASET_PATH=""
+DATASET_SHA=""
+MANIFEST="${CHUNK_ROOT}/manifest.json"
+if [[ -f "${MANIFEST}" ]]; then
+    mapfile -t MANIFEST_FIELDS < <(python3 - <<'PY' "${MANIFEST}"
+import json, sys
+data = json.load(open(sys.argv[1]))
+dataset = data.get("dataset", {})
+print(dataset.get("name", ""))
+print(dataset.get("path", ""))
+print(dataset.get("sha256", ""))
+PY
+)
+    DATASET_NAME="${MANIFEST_FIELDS[0]}"
+    DATASET_PATH="${MANIFEST_FIELDS[1]}"
+    DATASET_SHA="${MANIFEST_FIELDS[2]}"
+fi
+
 scripts/run_parity_parallel.sh \
     --root="${CHUNK_ROOT}" \
     --data-dir="${DATA_DIR}" \
@@ -125,4 +152,19 @@ scripts/run_parity_parallel.sh \
     "${CHUNKS[@]}"
 
 echo "[full-parity] computing quantiles…"
-julia --project="${PROJECT_PATH}" "${ROOT}/scripts/parity_quantiles.jl" "${OUTPUT_PATH}"
+RUNNER_DESC="scripts/run_parity_parallel.sh --root=${CHUNK_ROOT} --data-dir=${DATA_DIR} --jobs=${JOBS}"
+NOTES=()
+processed_note="Processed ${#CHUNKS[@]} chunk(s)"
+if [[ ${SAMPLE_CHUNKS} -gt 0 && ${#CHUNK_ARGS[@]} -eq 0 ]]; then
+    processed_note="${processed_note} out of ${TOTAL_AVAILABLE}"
+    NOTES+=("Random sample size: ${SAMPLE_CHUNKS}")
+fi
+NOTES+=("${processed_note}")
+CMD=( "julia" "--project=${PROJECT_PATH}" "${ROOT}/scripts/parity_quantiles.jl" "--input" "${OUTPUT_PATH}" "--markdown" "${REPORT_MARKDOWN}" "--title" "${REPORT_TITLE}" "--runner" "${RUNNER_DESC}" "--chunk-root" "${CHUNK_ROOT}" )
+[[ -n "${DATASET_NAME}" ]] && CMD+=( "--dataset" "${DATASET_NAME}" )
+[[ -n "${DATASET_PATH}" ]] && CMD+=( "--dataset-path" "${DATASET_PATH}" )
+[[ -n "${DATASET_SHA}" ]] && CMD+=( "--dataset-sha" "${DATASET_SHA}" )
+for note in "${NOTES[@]}"; do
+    CMD+=( "--note" "${note}" )
+done
+"${CMD[@]}"

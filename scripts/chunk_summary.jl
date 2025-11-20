@@ -1,6 +1,7 @@
 #!/usr/bin/env julia
 
 using JSON3
+using SHA
 
 # Load local module without requiring a Julia package environment
 const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
@@ -13,6 +14,7 @@ const Prep = CryptoSim.Preprocessing
 const Instr = Sim.Instrumentation
 const Domain = CryptoSim.DomainTypes
 const Loader = CryptoSim.ChunkLoader
+const Summary = CryptoSim.ChunkSummary
 
 struct Options
     chunk_root::String
@@ -116,16 +118,6 @@ function summarize_chunk(chunk::String, opts::Options, project_path::String)
     splits = Prep.adapt_trades(trades)
     Sim.run_exact_simulation!(state, splits)
     expected = Loader.read_expected(paths)
-    summary = CryptoSim.Metrics.summarize(state.metrics)
-    metrics = Dict{String,Any}()
-    rel_errors = Dict{Symbol,Float64}()
-    for name in (:volume, :slippage, :liquidity_density, :apy)
-        actual = getfield(summary, name)
-        ref = getfield(expected, name)
-        rel = ref == 0 ? 0.0 : (actual - ref) / ref
-        rel_errors[name] = rel
-        metrics[string(name)] = Dict("julia" => actual, "cpp" => ref, "rel_err" => rel)
-    end
     julia_log = dump_log(buffer, opts.keep_logs, paths)
     cpp_log = paths.cpp_log
     diff_success = isfile(cpp_log)
@@ -135,12 +127,29 @@ function summarize_chunk(chunk::String, opts::Options, project_path::String)
     else
         diff_output = "cpp_log.jsonl missing"
     end
-    return Dict(
-        "chunk" => chunk_id,
-        "metrics" => metrics,
-        "log_ok" => diff_success,
-        "log_diff" => diff_success ? "" : diff_output,
+    summary_metrics = CryptoSim.Metrics.summarize(state.metrics)
+    config_sha = isfile(paths.chunk_config) ? bytes2hex(sha256(read(paths.chunk_config))) : ""
+    meta_obj = chunk_data.metadata
+    trim_flag = haskey(meta_obj, "trim_flag") ? String(meta_obj["trim_flag"]) : ""
+    chunk_size = haskey(meta_obj, "chunk_size") ? Int(meta_obj["chunk_size"]) : nothing
+    data_sources = haskey(meta_obj, "source_datasets") ? [String(ds["name"]) for ds in meta_obj["source_datasets"]] : String[]
+    meta = (
+        data_dir = opts.data_dir,
+        ignore_bottom_pct = opts.ignore_bottom_pct,
+        config_sha256 = config_sha,
+        trim_flag = trim_flag,
+        chunk_size = chunk_size,
+        source_datasets = data_sources,
     )
+    summary = Summary.build_summary(
+        chunk_id,
+        summary_metrics,
+        expected;
+        log_ok=diff_success,
+        log_diff=diff_output,
+        metadata=meta,
+    )
+    return Summary.to_json_dict(summary)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

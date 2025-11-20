@@ -1,13 +1,11 @@
 module SimulatorMath
 
-import ..TradePair
 using ..SimulatorCore: CurveState
 
 export geometric_mean2, geometric_mean3, reduction_coefficient2, reduction_coefficient3,
-       ensure_positive_gamma, newton_D_2, newton_D_3, newton_y, newton_y_3,
-       solve_D, solve_x, xp, invariant_D, curve_y,
-       get_xcp2, get_xcp3, price2, price3, fee2, fee3,
-       copy_balances, restore_balances!, apply_boost!
+       ensure_positive_gamma, newton_D_2, newton_D_3, solve_D, newton_y, newton_y_3,
+       solve_x, xp, invariant_D, curve_y, get_xcp2, get_xcp3,
+       copy_balances, restore_balances!, apply_boost!, price2, price3, fee2, fee3
 
 geometric_mean2(vals::NTuple{2,T}) where {T<:AbstractFloat} = sqrt(vals[1] * vals[2])
 
@@ -70,7 +68,7 @@ function newton_D_2(A::T, gamma::T, xx::NTuple{2,T}, D0::T) where {T<:AbstractFl
         if D < 0
             D = abs(D) / 2
         end
-        if abs(D_prev - D) <= max(T(1e-16), D / T(1e14))
+        if abs(D - D_prev) <= max(T(1e-16), D / T(1e14))
             return D
         end
     end
@@ -82,30 +80,39 @@ function newton_D_3(A::T, gamma::T, xx::NTuple{3,T}, D0::T) where {T<:AbstractFl
     D = D0
     x = sort([xx[1], xx[2], xx[3]]; rev=true)
     S = x[1] + x[2] + x[3]
-    NN = T(3)^3
-    A_adj = A * NN
+    A_adj = A * T(27)
     rev_gamma = inv(gamma)
     gamma_1 = one(T) + gamma
     for _ in 1:255
         D_prev = D
-        K0 = NN
+        K0 = T(27)
         for val in x
             K0 = K0 * val / D
         end
         g1k0 = abs(gamma_1 - K0)
         mul1 = D * rev_gamma * g1k0 * rev_gamma * g1k0 / A_adj
-        mul2 = 3 * 3 * K0 / g1k0
+        mul2 = 2 * 3 * K0 / g1k0
         neg_fprime = (S + S * mul2) + mul1 * 3 / K0 - mul2 * D
         neg_fprime > 0 || error("neg_fprime must stay positive")
-        D = (D * neg_fprime + D * S - D * D) / neg_fprime - D * (mul1 / neg_fprime) * (1 - K0) / K0
+        D = (D * (neg_fprime + S - D)) / neg_fprime - D * (mul1 / neg_fprime) * (1 - K0) / K0
         if D < 0
             D = abs(D) / 2
         end
-        if abs(D_prev - D) <= max(T(1e-16), D / T(1e14))
+        if abs(D - D_prev) <= max(T(1e-16), D / T(1e14))
             return D
         end
     end
     error("newton_D_3 did not converge")
+end
+
+function solve_D(A::T, gamma::T, xp::AbstractVector{T}, N::Int) where {T<:AbstractFloat}
+    if N == 2
+        return newton_D_2(A, gamma, (xp[1], xp[2]), T(2) * geometric_mean2((xp[1], xp[2])))
+    elseif N == 3
+        return newton_D_3(A, gamma, (xp[1], xp[2], xp[3]), T(3) * geometric_mean3((xp[1], xp[2], xp[3])))
+    else
+        throw(ArgumentError("unsupported N=$N"))
+    end
 end
 
 function newton_y(A::T, gamma::T, x::Vector{T}, N::Int, D::T, i::Int) where {T<:AbstractFloat}
@@ -202,16 +209,6 @@ function newton_y_3(A::T, gamma::T, x::Vector{T}, D::T, i::Int) where {T<:Abstra
     error("newton_y_3 did not converge")
 end
 
-function solve_D(A::T, gamma::T, xp::AbstractVector{T}, N::Int) where {T<:AbstractFloat}
-    if N == 2
-        return newton_D_2(A, gamma, (xp[1], xp[2]), T(2) * geometric_mean2((xp[1], xp[2])))
-    elseif N == 3
-        return newton_D_3(A, gamma, (xp[1], xp[2], xp[3]), T(3) * geometric_mean3((xp[1], xp[2], xp[3])))
-    else
-        throw(ArgumentError("unsupported N=$N"))
-    end
-end
-
 function solve_x(A::T, gamma::T, x::AbstractVector{T}, N::Int, D::T, i::Int) where {T<:AbstractFloat}
     if N == 2
         buf = collect(x)
@@ -271,27 +268,27 @@ function apply_boost!(curve::CurveState{T}, dt::T, rate::T) where {T<:AbstractFl
 end
 
 function price2(curve::CurveState{T}, i::Int, j::Int, dx::T) where {T<:AbstractFloat}
-    dx_raw = dx * curve.p[i]
+    dx_raw = dx / curve.p[i]
     curve_res = curve_y(curve, curve.x[i] + dx_raw, i, j)
-    dy = curve.x[j] - curve_res
-    return dy == 0 ? zero(T) : dx_raw / dy
+    return dx_raw / (curve.x[j] - curve_res)
 end
 
 function price3(curve::CurveState{T}, i::Int, j::Int, dx::T) where {T<:AbstractFloat}
-    dx_raw = dx * curve.p[i]
+    dx_raw = dx / curve.p[i]
     curve_res = curve_y(curve, curve.x[i] + dx_raw, i, j)
-    dy = curve.x[j] - curve_res
-    return dy == 0 ? zero(T) : dx_raw / dy
+    return dx_raw / (curve.x[j] - curve_res)
 end
 
 function fee2(curve::CurveState{T}, mid_fee::T, out_fee::T, fee_gamma::T) where {T<:AbstractFloat}
-    K = reduction_coefficient2((curve.x[1], curve.x[2]), curve.gamma)
-    return mid_fee + (out_fee * K)
+    xp_vec = xp(curve)
+    coeff = reduction_coefficient2((xp_vec[1], xp_vec[2]), fee_gamma)
+    return mid_fee * coeff + out_fee * (1 - coeff)
 end
 
 function fee3(curve::CurveState{T}, mid_fee::T, out_fee::T, fee_gamma::T) where {T<:AbstractFloat}
-    K = reduction_coefficient3((curve.x[1], curve.x[2], curve.x[3]), curve.gamma)
-    return mid_fee + (out_fee * K)
+    xp_vec = xp(curve)
+    coeff = reduction_coefficient3((xp_vec[1], xp_vec[2], xp_vec[3]), fee_gamma)
+    return mid_fee * coeff + out_fee * (1 - coeff)
 end
 
 end # module

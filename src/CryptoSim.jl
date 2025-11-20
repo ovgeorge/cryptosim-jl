@@ -6,6 +6,7 @@ include("DataIO.jl")
 include("Preprocessing.jl")
 include("Metrics.jl")
 include("ChunkLoader.jl")
+include("ChunkSummary.jl")
 include("Simulator.jl")
 include("CLI.jl")
 
@@ -14,10 +15,11 @@ using .DataIO
 using .Preprocessing
 using .Metrics
 using .ChunkLoader
+using .ChunkSummary
 using .Simulator
 using .CLI
 
-export DomainTypes, DataIO, Preprocessing, ChunkLoader, Simulator, Metrics, CLI, run_cli
+export DomainTypes, DataIO, Preprocessing, ChunkLoader, ChunkSummary, Simulator, Metrics, CLI, run_cli
 
 """
     run_cli(args=Base.ARGS)
