@@ -1,47 +1,46 @@
 # CryptoSim V2
 
-This repository contains the Julia reimplementation of the Curve CryptoPool simulator alongside a vendored copy of the original C++ solver under `cryptopool-simulator/`.
+Julia reimplementation of Curve’s CryptoPool simulator plus a vendored copy of the original C++ solver in `cryptopool-simulator/`. The repo holds the parity tooling, scripts for producing chunk fixtures, and the reporting pipeline that keeps Julia and C++ in lockstep.
 
-## Current Parity Baseline
+## Architecture at a glance
 
-The best-to-date Julia ⇄ C++ parity snapshot (2,148 chunks from `data/ethusdt-1m-full.json.gz`) is captured in `reports/ethusdt_full_parity_summary.md`. Treat those quantiles as the minimum acceptable quality bar—future code changes must not degrade those relative errors without an explicit justification and updated report.
+- **Domain + IO (`DomainTypes`, `DataIO`, `Preprocessing`)** – define shared structs (`ChunkId`, `SplitTrade`, config readers) and split raw candles into deterministic DIR1/DIR2 legs so Julia consumes the same sequence as the C++ binary.
+- **Pool core (`SimulatorCore`, `SimulatorMath`)** – contains `Trader`, `CurveState`, fee/tweak/profit state, and the invariant math (`solve_D`, `curve_y`, `exchange{2,3}!`, `price{2,3}`) that mutates pool reserves exactly like the legacy solver.
+- **Trading loop (`Simulator`, `SimulationRunner`)** – wires the core math into `step_for_price`, `execute_trade!`, `tweak_price!`, and `run_split_trades!`. Each leg probes profit tolerances, executes the swap, applies boosts, updates moving-average targets, and accumulates slippage/volume/APY metrics.
+- **Instrumentation & metrics (`SimulatorInstrumentation`, `SimulatorLogger`, `Metrics`)** – emit structured PRELEG/STEP/LEG/TWEAK logs, optional step traces/probes, and aggregate per-chunk metrics so parity diffs line up with the C++ JSON logs.
+- **Tooling (`ChunkLoader`, `ChunkSummary`, `CLI`)** – shared helpers used by the summarizer scripts and tests; everything exposes the `CryptoSim` module so downstream code can simply `using CryptoSim`.
 
-Run `scripts/full_parity_report.sh` for a full “fire-and-forget” sweep: it calls the GNU-parallel runner to resummarize every chunk under `artifacts/chunks_ethusdt-1m-full/`, overwrites `reports/ethusdt_full_chunk_summary.jsonl`, and then invokes `scripts/parity_quantiles.jl` to print the quantile table **and regenerate the Markdown snapshot**. Both scripts are argument-free by default; override `CHUNK_ROOT`, `DATA_DIR`, `OUTPUT_PATH`, `REPORT_MARKDOWN`, or `JOBS` via environment variables when needed. The report helper also accepts provenance overrides (`--dataset`, `--dataset-sha`, `--runner`, `--note`, etc.) so every markdown refresh clearly records which dataset/chunk root and command produced it.
+## Data & artifacts
 
-Each JSONL row emitted by `scripts/chunk_summary.jl` now carries structured metadata (config SHA256, chunk size, trim flag, source datasets, and CLI options). Downstream tooling—`scripts/parity_quantiles.jl`, the markdown renderer, and any future dashboards—consume the shared `CryptoSim.ChunkSummary` module to compute quantiles, build tables, and render documentation without reimplementing relative-error math. Under the hood these scripts go through the shared `CryptoSim.DomainTypes`/`ChunkLoader` helpers and the new `Simulator` façade that wraps the core, math, and logging modules, so any tooling you build should also just import `CryptoSim` rather than reimplementing path math or solver internals.
+`data/` is a symlink to `/home/george/data` and must stay read-only. Place every generated chunk, decompressed dataset, or log under `artifacts/` (already git-ignored). Scripts assume chunk roots are laid out as `artifacts/chunks_<dataset>/chunkXXXXX`.
 
-## Data layout
+## Chunk generation
 
-The `data/` entry in this tree is a symbolic link to `/home/george/data`. Treat it as read-only: do not dump generated fixtures, decompressed candles, or any other throwaway artifacts there. Instead use `artifacts/` (ignored by git) for derived data such as decompressed candle feeds, chunk JSON files, and logs.
-
-## Useful scripts
-
-* `scripts/capture_chunks.sh` – capture a few `trimXXXXX` chunks from the C++ simulator (defaults to Curve's 2-coin config).
-* `scripts/generate_chunks.py` – batch-produce chunk fixtures from a raw dataset while running both C++ solvers.
-* `scripts/generate_chunks_parallel.py` – fan out the sequential generator across all CPU cores so chunk production (and simulator runs) stay fully saturated.
-* `scripts/run_parity_parallel.sh` – run `chunk_summary.jl` for every chunk directory (works with `gnu parallel`).
-
-See `reports/` for current divergence notes and diagnostic dumps.
-
-## Tests
-
-Run `julia --project=. test/runtests.jl` to execute lightweight sanity checks covering chunk path validation and simulator initialization. These tests ensure the refactored core modules load correctly before running heavier parity sweeps.
-
-## Parallel chunk generation
-
-Use `scripts/generate_chunks_parallel.py` whenever you need to materialize a large chunk set (for example, 100-candle windows from everything stored under `data/`). The wrapper keeps invoking `scripts/generate_chunks.py` under the hood but splits the work into contiguous ranges and automatically launches one worker per hardware thread—**we always want to use every core, always**. Override `--jobs` only when you explicitly need to throttle a run (such as on a shared box).
-
-Example:
+Materialize fixtures with the parallel wrapper so all CPU cores stay busy:
 
 ```bash
 python scripts/generate_chunks_parallel.py \
-  --dataset data/ethusdt-1m.json.gz \
+  --dataset data/ethusdt-1m-full.json.gz \
   --config configs/ethusdt_chunk_config.json \
-  --output artifacts/chunks_ethusdt-1m_100 \
-  --chunk-size 100 \
+  --output artifacts/chunks_ethusdt-1m-full \
+  --chunk-size 2000 \
   --instrumented-sim cryptopool-simulator/simu \
   --chunks-per-job 256 \
   --force
 ```
 
-The gold solver is optional for now (pass `--gold-sim` once you have the pristine binary) and must never point to the same executable as `--instrumented-sim`.
+That script fans out `generate_chunks.py`, runs both C++ solvers if configured, and refreshes the chunk manifest (dataset name/path/SHA, chunk size, emitted IDs). Use `--jobs` only when you need to throttle; otherwise the wrapper launches `os.cpu_count()` workers automatically.
+
+## Full parity sweep
+
+The canonical parity report lives in `reports/ethusdt_full_parity_summary.md` (currently 2,148 chunks from `data/ethusdt-1m-full.json.gz`). Regenerate it via:
+
+```bash
+scripts/full_parity_report.sh
+```
+
+The helper prints its config, calls `scripts/run_parity_parallel.sh` to run `scripts/chunk_summary.jl` over every `chunk*` directory with GNU `parallel`, writes a fresh `reports/ethusdt_full_chunk_summary.jsonl`, and finally runs `scripts/parity_quantiles.jl` to emit the quantile table + markdown snapshot. Override `CHUNK_ROOT`, `DATA_DIR`, `OUTPUT_PATH`, `REPORT_MARKDOWN`, or `JOBS` via flags or environment variables, and use `--note`/`--runner` arguments to document provenance.
+
+## Tests
+
+Run `julia --project=. test/runtests.jl` before heavy sweeps. The suite sanity-checks chunk path validation, simulator initialization, and other guard rails so regressions are caught quickly.
