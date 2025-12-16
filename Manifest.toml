@@ -2,7 +2,7 @@
 
 julia_version = "1.12.1"
 manifest_format = "2.0"
-project_hash = "8b2e2f159905570561186dbb5aa41f663d8fe1e9"
+project_hash = "ee9db00e057929ad9d66adca916ff02b78d2cf38"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -39,7 +39,7 @@ version = "1.6.0"
     StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [[deps.CryptoSim]]
-deps = ["DoubleFloats", "JSON3", "Logging", "Mmap", "Parsers", "StructTypes"]
+deps = ["DoubleFloats", "JSON3", "Logging", "Mmap", "Parsers", "Printf", "StructTypes"]
 path = "."
 uuid = "d51330e2-fbdc-4705-9ef0-b6e3d6f06374"
 version = "0.1.0"
