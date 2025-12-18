@@ -48,6 +48,10 @@ def open_text(path: Path):
         import gzip
 
         return gzip.open(path, "rt", encoding="utf-8")
+    if ".xz" in path.suffixes:
+        import lzma
+
+        return lzma.open(path, "rt", encoding="utf-8")
     return path.open("r", encoding="utf-8")
 
 
