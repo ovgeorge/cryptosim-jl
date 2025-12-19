@@ -18,6 +18,8 @@ Override via CLI flags:
   --max-chunks=N
   --mode=per-chunk|combined
   --window-days=N --window-end=last|first
+  --A-scale=log|linear --fee-scale=log|linear
+  --A-center=VAL --A-factor=VAL
   --A-min=VAL --A-max=VAL --A-count=N
   --fee-min=VAL --fee-max=VAL --fee-count=N
 """
@@ -46,6 +48,10 @@ Base.@kwdef mutable struct Options
     mode::Symbol = :per_chunk
     window_days::Int = 365
     window_end::Symbol = :last
+    A_scale::Symbol = :log
+    fee_scale::Symbol = :log
+    A_center::Union{Nothing,Float64} = nothing
+    A_factor::Float64 = 10.0
     A_min::Float64 = 0.05
     A_max::Float64 = 5.0
     A_count::Int = 8
@@ -66,6 +72,10 @@ function usage()
       --mode=per-chunk|combined Run per chunk (many rows) or on a combined trade stream (one row per grid point)
       --window-days=N          Restrict dataset run to the last/first N days (default: 365; only applies with --dataset)
       --window-end=last|first  Anchor the window at the dataset end or start (default: last; only applies with --dataset)
+      --A-scale=log|linear     A grid spacing (default: log)
+      --fee-scale=log|linear   Fee grid spacing (default: log)
+      --A-center=VAL           Center A around VAL (overrides --A-min/--A-max when set)
+      --A-factor=VAL           When using --A-center, span [A/factor, A*factor] (default: 10)
       --A-min=VAL              Smallest A in the log grid (default: 0.05)
       --A-max=VAL              Largest A in the log grid (default: 5.0)
       --A-count=N              Points in the A grid (default: 8)
@@ -117,6 +127,28 @@ function parse_args()
             opts.A_min = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--A-max=")
             opts.A_max = parse(Float64, split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--A-scale=")
+            raw = lowercase(split(arg, '='; limit=2)[2])
+            if raw in ("log", "log10", "logspace")
+                opts.A_scale = :log
+            elseif raw in ("lin", "linear", "linspace")
+                opts.A_scale = :linear
+            else
+                error("Invalid --A-scale=$(raw). Expected log or linear.")
+            end
+        elseif startswith(arg, "--fee-scale=")
+            raw = lowercase(split(arg, '='; limit=2)[2])
+            if raw in ("log", "log10", "logspace")
+                opts.fee_scale = :log
+            elseif raw in ("lin", "linear", "linspace")
+                opts.fee_scale = :linear
+            else
+                error("Invalid --fee-scale=$(raw). Expected log or linear.")
+            end
+        elseif startswith(arg, "--A-center=")
+            opts.A_center = parse(Float64, split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--A-factor=")
+            opts.A_factor = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--A-count=")
             opts.A_count = parse(Int, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--fee-min=")
@@ -129,10 +161,23 @@ function parse_args()
             error("Unrecognized argument: $(arg)")
         end
     end
+    if opts.A_center !== nothing
+        center = opts.A_center::Float64
+        isfinite(center) || error("A_center must be finite (got $(center))")
+        center > 0 || error("A_center must be > 0 (got $(center))")
+        opts.A_factor > 1 || error("A_factor must be > 1 (got $(opts.A_factor))")
+        opts.A_min = center / opts.A_factor
+        opts.A_max = center * opts.A_factor
+    end
     opts.A_min > 0 || error("A_min must be > 0 (got $(opts.A_min))")
     opts.A_max > 0 || error("A_max must be > 0 (got $(opts.A_max))")
-    opts.fee_min > 0 || error("fee_min must be > 0 (got $(opts.fee_min))")
-    opts.fee_max > 0 || error("fee_max must be > 0 (got $(opts.fee_max))")
+    if opts.fee_scale === :log
+        opts.fee_min > 0 || error("fee_min must be > 0 for log scale (got $(opts.fee_min))")
+        opts.fee_max > 0 || error("fee_max must be > 0 for log scale (got $(opts.fee_max))")
+    else
+        opts.fee_min >= 0 || error("fee_min must be >= 0 for linear scale (got $(opts.fee_min))")
+        opts.fee_max >= 0 || error("fee_max must be >= 0 for linear scale (got $(opts.fee_max))")
+    end
     opts.A_max > opts.A_min || error("A_max must exceed A_min")
     opts.fee_max > opts.fee_min || error("fee_max must exceed fee_min")
     opts.A_count > 0 || error("A_count must be positive")
@@ -144,6 +189,17 @@ end
 
 logspace(lo::Float64, hi::Float64, count::Int) =
     [10.0 ^ x for x in range(log10(lo), log10(hi); length=count)]
+
+linspace(lo::Float64, hi::Float64, count::Int) =
+    collect(range(lo, hi; length=count))
+
+function build_grid(lo::Float64, hi::Float64, count::Int, scale::Symbol)
+    if scale === :linear
+        return linspace(lo, hi, count)
+    else
+        return logspace(lo, hi, count)
+    end
+end
 
 function list_chunks(root::AbstractString, max_chunks::Int)
     isdir(root) || error("Chunk root $(root) not found. Pass --chunk-root=PATH.")
@@ -519,8 +575,8 @@ end
 function main()
     opts = parse_args()
     mkpath(dirname(opts.output))
-    A_grid = logspace(opts.A_min, opts.A_max, opts.A_count)
-    fee_grid = logspace(opts.fee_min, opts.fee_max, opts.fee_count)
+    A_grid = build_grid(opts.A_min, opts.A_max, opts.A_count, opts.A_scale)
+    fee_grid = build_grid(opts.fee_min, opts.fee_max, opts.fee_count, opts.fee_scale)
     open(opts.output, "w") do io
         if !isempty(opts.dataset_path)
             @info "running grid" mode="dataset" config=opts.config_path dataset=opts.dataset_path data_dir=opts.data_dir output=opts.output
