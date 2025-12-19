@@ -39,6 +39,8 @@ Base.@kwdef mutable struct Options
     surface_fee_count::Int = 256
     window_days::Int = 365
     window_end::Symbol = :last
+    A_min::Union{Nothing,Float64} = nothing
+    A_max::Union{Nothing,Float64} = nothing
     A_center::Float64 = 1_707_629.0
     A_factor::Float64 = 10.0
     fee_min::Float64 = 0.0
@@ -47,6 +49,8 @@ Base.@kwdef mutable struct Options
     rounds::Int = 2
     candidates::Int = 20_000
     hyper_samples::Int = 200
+    acq::Symbol = :ei
+    explore_frac::Float64 = 0.0
     seed::Int = 0
     jitter::Float64 = 1e-9
 end
@@ -63,6 +67,8 @@ function usage()
       --surface-fee-count=N  Surface grid fee points (default: 256)
       --window-days=N        Restrict to last/first N days (default: 365; 0 disables)
       --window-end=last|first Anchor the window at dataset end or start (default: last)
+      --A-min=VAL            Lower A bound (log scale); overrides --A-center/--A-factor
+      --A-max=VAL            Upper A bound (log scale); overrides --A-center/--A-factor
       --A-center=VAL         Center of the A search range (default: 1707629)
       --A-factor=VAL         Search A in [A/factor, A*factor] (default: 10)
       --fee-min=VAL          Min mid_fee/out_fee (default: 0)
@@ -71,6 +77,8 @@ function usage()
       --rounds=N             Rounds to run (default: 2)
       --candidates=N         Candidate pool size per round (default: 20000)
       --hyper-samples=N      Random hyperparameter samples for GP fit (default: 200)
+      --acq=ei|maxstd|mix     Acquisition: EI (exploit), maxstd (explore), or mix (default: ei)
+      --explore-frac=VAL      For --acq=mix, fraction of batch from maxstd (default: 0.0)
       --seed=N               RNG seed (default: 0)
     """)
 end
@@ -106,6 +114,10 @@ function parse_args()
             else
                 error("Invalid --window-end=$(raw). Expected last or first.")
             end
+        elseif startswith(arg, "--A-min=")
+            opts.A_min = parse(Float64, split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--A-max=")
+            opts.A_max = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--A-center=")
             opts.A_center = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--A-factor=")
@@ -122,6 +134,19 @@ function parse_args()
             opts.candidates = parse(Int, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--hyper-samples=")
             opts.hyper_samples = parse(Int, split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--acq=")
+            raw = lowercase(split(arg, '='; limit=2)[2])
+            if raw in ("ei", "expected-improvement", "expected_improvement")
+                opts.acq = :ei
+            elseif raw in ("maxstd", "max-std", "max_std", "uncertainty", "variance")
+                opts.acq = :maxstd
+            elseif raw in ("mix", "mixed")
+                opts.acq = :mix
+            else
+                error("Invalid --acq=$(raw). Expected ei, maxstd, or mix.")
+            end
+        elseif startswith(arg, "--explore-frac=")
+            opts.explore_frac = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--seed=")
             opts.seed = parse(Int, split(arg, '='; limit=2)[2])
         else
@@ -142,6 +167,18 @@ function parse_args()
     opts.hyper_samples > 0 || error("hyper_samples must be positive")
     opts.surface_A_count > 0 || error("surface_A_count must be positive")
     opts.surface_fee_count > 0 || error("surface_fee_count must be positive")
+    if opts.A_min !== nothing || opts.A_max !== nothing
+        (opts.A_min !== nothing && opts.A_max !== nothing) || error("Specify both --A-min and --A-max (or neither).")
+        Amin = opts.A_min::Float64
+        Amax = opts.A_max::Float64
+        Amin > 0 || error("A_min must be > 0")
+        Amax > Amin || error("A_max must exceed A_min")
+    end
+    if opts.acq === :mix
+        (0.0 <= opts.explore_frac <= 1.0) || error("explore_frac must be in [0,1]")
+    else
+        opts.explore_frac = 0.0
+    end
     return opts
 end
 
@@ -171,6 +208,15 @@ logspace(lo::Float64, hi::Float64, count::Int) =
 
 linspace(lo::Float64, hi::Float64, count::Int) =
     collect(range(lo, hi; length=count))
+
+function logA_bounds(opts::Options)
+    if opts.A_min !== nothing
+        Amin = opts.A_min::Float64
+        Amax = opts.A_max::Float64
+        return log10(Amin), log10(Amax)
+    end
+    return log10(opts.A_center / opts.A_factor), log10(opts.A_center * opts.A_factor)
+end
 
 function load_dataset_bundle(opts::Options)
     cfg_file = DataIO.load_config(opts.config_path)
@@ -392,8 +438,7 @@ function select_next_batch(X::Vector{NTuple{2,Float64}}, y::Vector{Float64}, opt
 
     candidates = Vector{Tuple{Float64,Float64,Float64,Float64,Float64}}(undef, opts.candidates)
     # (A, fee, mean, std, EI)
-    logA_min = log10(opts.A_center / opts.A_factor)
-    logA_max = log10(opts.A_center * opts.A_factor)
+    logA_min, logA_max = logA_bounds(opts)
 
     @inbounds for i in 1:opts.candidates
         u1 = rand(rng)
@@ -427,14 +472,60 @@ function select_next_batch(X::Vector{NTuple{2,Float64}}, y::Vector{Float64}, opt
                   (kriging = (gp_mean = μ0, gp_std = σ0, ei = ei0),
                    gp = (log_marginal = ll, σf = hyp.σf, l1 = hyp.l1, l2 = hyp.l2, σn = hyp.σn))))
 
-    order = sortperm(1:length(candidates); by = i -> candidates[i][5], rev = true)
-    for idx in order
-        length(picks) >= opts.batch && break
-        A, fee, μ, σ, ei = candidates[idx]
-        key = point_key(A, fee)
-        key in seen && continue
-        push!(seen, key)
-        push!(picks, (A, fee, (kriging = (gp_mean = μ, gp_std = σ, ei = ei),)))
+    if opts.acq === :maxstd
+        order = sortperm(1:length(candidates); by = i -> candidates[i][4], rev = true)
+        for idx in order
+            length(picks) >= opts.batch && break
+            A, fee, μ, σ, ei = candidates[idx]
+            key = point_key(A, fee)
+            key in seen && continue
+            push!(seen, key)
+            push!(picks, (A, fee, (kriging = (gp_mean = μ, gp_std = σ, ei = ei),)))
+        end
+    elseif opts.acq === :mix
+        explore_n = clamp(round(Int, opts.explore_frac * opts.batch), 0, opts.batch)
+        exploit_n = opts.batch - explore_n
+        # We've already included one exploit point (max mean), so reduce remaining exploit picks.
+        exploit_left = max(0, exploit_n - 1)
+        explore_left = explore_n
+
+        if explore_left > 0
+            order_std = sortperm(1:length(candidates); by = i -> candidates[i][4], rev = true)
+            for idx in order_std
+                explore_left == 0 && break
+                length(picks) >= opts.batch && break
+                A, fee, μ, σ, ei = candidates[idx]
+                key = point_key(A, fee)
+                key in seen && continue
+                push!(seen, key)
+                push!(picks, (A, fee, (kriging = (gp_mean = μ, gp_std = σ, ei = ei),)))
+                explore_left -= 1
+            end
+        end
+
+        if exploit_left > 0 && length(picks) < opts.batch
+            order_ei = sortperm(1:length(candidates); by = i -> candidates[i][5], rev = true)
+            for idx in order_ei
+                exploit_left == 0 && break
+                length(picks) >= opts.batch && break
+                A, fee, μ, σ, ei = candidates[idx]
+                key = point_key(A, fee)
+                key in seen && continue
+                push!(seen, key)
+                push!(picks, (A, fee, (kriging = (gp_mean = μ, gp_std = σ, ei = ei),)))
+                exploit_left -= 1
+            end
+        end
+    else
+        order = sortperm(1:length(candidates); by = i -> candidates[i][5], rev = true)
+        for idx in order
+            length(picks) >= opts.batch && break
+            A, fee, μ, σ, ei = candidates[idx]
+            key = point_key(A, fee)
+            key in seen && continue
+            push!(seen, key)
+            push!(picks, (A, fee, (kriging = (gp_mean = μ, gp_std = σ, ei = ei),)))
+        end
     end
     return ll, hyp, picks
 end
@@ -452,8 +543,7 @@ function dedupe_points!(points, seen::Set{Tuple{Int64,Int64}})
 end
 
 function initial_points(opts::Options)
-    logA_min = log10(opts.A_center / opts.A_factor)
-    logA_max = log10(opts.A_center * opts.A_factor)
+    logA_min, logA_max = logA_bounds(opts)
     As = [10.0 ^ (logA_min + (i + 0.5) / 8 * (logA_max - logA_min)) for i in 0:7]
     fees = [opts.fee_min + (j + 0.5) / 4 * (opts.fee_max - opts.fee_min) for j in 0:3]
     pts = Tuple{Float64,Float64,NamedTuple}[]
@@ -483,8 +573,7 @@ function dump_surface(out_path::AbstractString, opts::Options, observations)
     ok = filter(r -> r[:status] == "ok", observations)
     isempty(ok) && error("No successful points to build a surface")
 
-    logA_min = log10(opts.A_center / opts.A_factor)
-    logA_max = log10(opts.A_center * opts.A_factor)
+    logA_min, logA_max = logA_bounds(opts)
 
     X = NTuple{2,Float64}[]
     apy = Float64[]
@@ -515,13 +604,15 @@ function dump_surface(out_path::AbstractString, opts::Options, observations)
     _, hyp_liq = fit_gp(X, liq; samples=surface_hyper, rng=rng, jitter=opts.jitter)
     post_liq = build_gp_posterior(X, liq, hyp_liq; jitter=opts.jitter)
 
-    As = logspace(opts.A_center / opts.A_factor, opts.A_center * opts.A_factor, opts.surface_A_count)
+    Amin = opts.A_min === nothing ? (opts.A_center / opts.A_factor) : (opts.A_min::Float64)
+    Amax = opts.A_max === nothing ? (opts.A_center * opts.A_factor) : (opts.A_max::Float64)
+    As = logspace(Amin, Amax, opts.surface_A_count)
     fees = linspace(opts.fee_min, opts.fee_max, opts.surface_fee_count)
     mkpath(dirname(out_path))
     open(out_path, "w") do io
         for A in As, fee in fees
             xstar = to_features(A, fee, logA_min, logA_max, opts.fee_min, opts.fee_max)
-            apy_hat = gp_mean_one(X, post_apy, hyp_apy, xstar)
+            apy_hat, apy_std = gp_predict_one(X, post_apy, hyp_apy, xstar)
             vol_hat = gp_mean_one(X, post_vol, hyp_vol, xstar)
             slip_hat = gp_mean_one(X, post_slip, hyp_slip, xstar)
             liq_hat = gp_mean_one(X, post_liq, hyp_liq, xstar)
@@ -535,6 +626,7 @@ function dump_surface(out_path::AbstractString, opts::Options, observations)
                 out_fee = fee,
                 metrics = (
                     apy = max(0.0, apy_hat),
+                    apy_std = max(0.0, apy_std),
                     volume = max(0.0, vol_hat),
                     slippage = max(0.0, slip_hat),
                     liquidity_density = max(0.0, liq_hat),
