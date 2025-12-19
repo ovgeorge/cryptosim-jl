@@ -44,6 +44,7 @@ Base.@kwdef mutable struct Options
     dataset_path::String = ""
     data_dir::String = DataIO.DEFAULT_DATA_DIR
     output::String = normpath(joinpath(PROJECT_ROOT, "artifacts", "experiments", "stableswap2_grid", "results.jsonl"))
+    boost_rate::Union{Nothing,Float64} = nothing
     max_chunks::Int = 50
     mode::Symbol = :per_chunk
     window_days::Int = 365
@@ -68,6 +69,7 @@ function usage()
       --dataset=PATH           Run on a single dataset path (no chunks); overrides config datafile(s)
       --data-dir=PATH          Where chunk JSON lives (default: $(DataIO.DEFAULT_DATA_DIR))
       --output=PATH            JSONL destination (default: $(Options().output))
+      --boost-rate=VAL         Annual donation/boost rate (default: from config)
       --max-chunks=N           Limit how many chunks to process (default: 50)
       --mode=per-chunk|combined Run per chunk (many rows) or on a combined trade stream (one row per grid point)
       --window-days=N          Restrict dataset run to the last/first N days (default: 365; only applies with --dataset)
@@ -101,6 +103,8 @@ function parse_args()
             opts.data_dir = normpath(split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--output=")
             opts.output = normpath(split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--boost-rate=")
+            opts.boost_rate = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--max-chunks=")
             opts.max_chunks = parse(Int, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--mode=")
@@ -184,6 +188,11 @@ function parse_args()
     opts.fee_count > 0 || error("fee_count must be positive")
     opts.max_chunks != 0 || error("max_chunks must be non-zero")
     (opts.window_days >= 0) || error("window_days must be >= 0")
+    if opts.boost_rate !== nothing
+        br = opts.boost_rate::Float64
+        isfinite(br) || error("boost_rate must be finite (got $(br))")
+        br >= 0 || error("boost_rate must be >= 0 (got $(br))")
+    end
     return opts
 end
 
@@ -214,7 +223,8 @@ function list_chunks(root::AbstractString, max_chunks::Int)
     end
 end
 
-@inline function override_config(base::DataIO.SimulationConfig, A::Float64, fee::Float64)
+@inline function override_config(base::DataIO.SimulationConfig, A::Float64, fee::Float64,
+                                 boost_rate_override::Union{Nothing,Float64})
     return DataIO.SimulationConfig(
         A,
         base.gamma,
@@ -228,7 +238,7 @@ end
         base.ma_half_time,
         base.ext_fee,
         base.gas_fee,
-        base.boost_rate,
+        boost_rate_override === nothing ? base.boost_rate : boost_rate_override,
         base.log,
     )
 end
@@ -296,7 +306,7 @@ function run_chunk(io, paths::Domain.ChunkPaths, opts::Options, A_grid, fee_grid
     data.config.n == 2 || error("Chunk $(paths) is not 2-coin (n=$(data.config.n))")
     trades = Prep.adapt_trades(data.trades) # reuse adapted trades across the grid
     for A in A_grid, fee in fee_grid
-        cfg = override_config(data.config, A, fee)
+        cfg = override_config(data.config, A, fee, opts.boost_rate)
         record = try
             merge(
                 (mode = "per-chunk",),
@@ -386,7 +396,7 @@ function run_combined(io, chunks::Vector{String}, opts::Options, A_grid, fee_gri
         jF = (idx - 1) % nF + 1
         A = A_grid[iA]
         fee = fee_grid[jF]
-        cfg = override_config(bundle.cfg, A, fee)
+        cfg = override_config(bundle.cfg, A, fee, opts.boost_rate)
         records[idx] = try
             state = Sim.SimulationState(cfg, bundle.price_vec)
             Sim.run_exact_simulation!(state, bundle.trades)
@@ -505,7 +515,7 @@ function run_dataset(io, opts::Options, A_grid, fee_grid)
         jF = (idx - 1) % nF + 1
         A = A_grid[iA]
         fee = fee_grid[jF]
-        cfg = override_config(bundle.cfg, A, fee)
+        cfg = override_config(bundle.cfg, A, fee, opts.boost_rate)
         records[idx] = try
             state = Sim.SimulationState(cfg, bundle.price_vec)
             Sim.run_exact_simulation!(state, bundle.trades)

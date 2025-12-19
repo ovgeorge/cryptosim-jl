@@ -45,6 +45,7 @@ Base.@kwdef mutable struct Options
     A_factor::Float64 = 10.0
     fee_min::Float64 = 0.0
     fee_max::Float64 = 0.5
+    boost_rate::Union{Nothing,Float64} = nothing
     batch::Int = 32
     rounds::Int = 2
     candidates::Int = 20_000
@@ -73,6 +74,7 @@ function usage()
       --A-factor=VAL         Search A in [A/factor, A*factor] (default: 10)
       --fee-min=VAL          Min mid_fee/out_fee (default: 0)
       --fee-max=VAL          Max mid_fee/out_fee (default: 0.5)
+      --boost-rate=VAL       Annual donation/boost rate (default: from config)
       --batch=N              Simulations per round (default: 32)
       --rounds=N             Rounds to run (default: 2)
       --candidates=N         Candidate pool size per round (default: 20000)
@@ -126,6 +128,8 @@ function parse_args()
             opts.fee_min = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--fee-max=")
             opts.fee_max = parse(Float64, split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--boost-rate=")
+            opts.boost_rate = parse(Float64, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--batch=")
             opts.batch = parse(Int, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--rounds=")
@@ -179,10 +183,16 @@ function parse_args()
     else
         opts.explore_frac = 0.0
     end
+    if opts.boost_rate !== nothing
+        br = opts.boost_rate::Float64
+        isfinite(br) || error("boost_rate must be finite (got $(br))")
+        br >= 0 || error("boost_rate must be >= 0 (got $(br))")
+    end
     return opts
 end
 
-@inline function override_config(base::DataIO.SimulationConfig, A::Float64, fee::Float64)
+@inline function override_config(base::DataIO.SimulationConfig, A::Float64, fee::Float64,
+                                 boost_rate_override::Union{Nothing,Float64})
     return DataIO.SimulationConfig(
         A,
         base.gamma,
@@ -196,7 +206,7 @@ end
         base.ma_half_time,
         base.ext_fee,
         base.gas_fee,
-        base.boost_rate,
+        boost_rate_override === nothing ? base.boost_rate : boost_rate_override,
         base.log,
     )
 end
@@ -262,7 +272,7 @@ function run_batch(bundle, base_cfg::DataIO.SimulationConfig, points; threads::I
     records = Vector{Any}(undef, n)
     Threads.@threads for i in 1:n
         A, fee, meta = points[i]
-        cfg = override_config(base_cfg, A, fee)
+        cfg = override_config(base_cfg, A, fee, meta[:boost_rate_override])
         records[i] = try
             state = Sim.SimulationState(cfg, bundle.price_vec)
             Sim.run_exact_simulation!(state, bundle.trades)
@@ -276,6 +286,7 @@ function run_batch(bundle, base_cfg::DataIO.SimulationConfig, points; threads::I
                     A = A,
                     mid_fee = fee,
                     out_fee = fee,
+                    boost_rate = cfg.boost_rate,
                     metrics = metrics,
                     profit = (
                         xcp_profit_real = trader.profit.xcp_profit_real,
@@ -293,6 +304,7 @@ function run_batch(bundle, base_cfg::DataIO.SimulationConfig, points; threads::I
                     A = A,
                     mid_fee = fee,
                     out_fee = fee,
+                    boost_rate = cfg.boost_rate,
                     error = string(err),
                 ),
                 meta,
@@ -548,7 +560,7 @@ function initial_points(opts::Options)
     fees = [opts.fee_min + (j + 0.5) / 4 * (opts.fee_max - opts.fee_min) for j in 0:3]
     pts = Tuple{Float64,Float64,NamedTuple}[]
     for A in As, fee in fees
-        push!(pts, (A, fee, (round = 1, strategy = "initial",)))
+        push!(pts, (A, fee, (round = 1, strategy = "initial", boost_rate_override = opts.boost_rate)))
     end
     length(pts) == 32 || error("internal: expected 32 initial points")
     if opts.batch != 32
@@ -562,7 +574,7 @@ function initial_points(opts::Options)
                 u2 = rand(rng)
                 A = 10.0 ^ (logA_min + u1 * (logA_max - logA_min))
                 fee = opts.fee_min + u2 * (opts.fee_max - opts.fee_min)
-                push!(pts, (A, fee, (round = 1, strategy = "initial-random",)))
+                push!(pts, (A, fee, (round = 1, strategy = "initial-random", boost_rate_override = opts.boost_rate)))
             end
         end
     end
@@ -679,7 +691,7 @@ function main()
             end
             length(y) >= 8 || error("Need at least 8 successful points to fit GP (got $(length(y)))")
             ll, hyp, pts = select_next_batch(X, y, opts; rng=rng)
-            pts = [(A, fee, merge(meta, (round = round, strategy = "kriging",))) for (A, fee, meta) in pts]
+            pts = [(A, fee, merge(meta, (round = round, strategy = "kriging", boost_rate_override = opts.boost_rate))) for (A, fee, meta) in pts]
             pts = dedupe_points!(pts, points_seen)
             if length(pts) < opts.batch
                 # Rarely, the candidate pool can collide with previously-sampled points after rounding;
@@ -689,7 +701,7 @@ function main()
                 while length(pts) < opts.batch
                     A = 10.0 ^ (logA_min + rand(rng) * (logA_max - logA_min))
                     fee = opts.fee_min + rand(rng) * (opts.fee_max - opts.fee_min)
-                    extra = dedupe_points!([(A, fee, (round = round, strategy = "kriging-topup",))], points_seen)
+                    extra = dedupe_points!([(A, fee, (round = round, strategy = "kriging-topup", boost_rate_override = opts.boost_rate))], points_seen)
                     isempty(extra) && continue
                     push!(pts, extra[1])
                 end
