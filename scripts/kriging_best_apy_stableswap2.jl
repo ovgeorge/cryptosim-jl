@@ -34,6 +34,9 @@ Base.@kwdef mutable struct Options
     config_path::String = normpath(joinpath(PROJECT_ROOT, "configs", "ethusdt_chunk_config.json"))
     data_dir::String = DataIO.DEFAULT_DATA_DIR
     output::String = normpath(joinpath(PROJECT_ROOT, "artifacts", "experiments", "stableswap2_kriging", "results.jsonl"))
+    surface_out::String = ""
+    surface_A_count::Int = 256
+    surface_fee_count::Int = 256
     window_days::Int = 365
     window_end::Symbol = :last
     A_center::Float64 = 1_707_629.0
@@ -55,6 +58,9 @@ function usage()
       --config=PATH          Simulator config template (default: $(Options().config_path))
       --data-dir=PATH        Where config datafiles live (default: $(DataIO.DEFAULT_DATA_DIR))
       --output=PATH          JSONL destination (default: $(Options().output))
+      --surface-out=PATH     Write a predicted surface grid JSONL (default: disabled)
+      --surface-A-count=N    Surface grid A points (default: 256)
+      --surface-fee-count=N  Surface grid fee points (default: 256)
       --window-days=N        Restrict to last/first N days (default: 365; 0 disables)
       --window-end=last|first Anchor the window at dataset end or start (default: last)
       --A-center=VAL         Center of the A search range (default: 1707629)
@@ -83,6 +89,12 @@ function parse_args()
             opts.data_dir = normpath(split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--output=")
             opts.output = normpath(split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--surface-out=")
+            opts.surface_out = normpath(split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--surface-A-count=")
+            opts.surface_A_count = parse(Int, split(arg, '='; limit=2)[2])
+        elseif startswith(arg, "--surface-fee-count=")
+            opts.surface_fee_count = parse(Int, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--window-days=")
             opts.window_days = parse(Int, split(arg, '='; limit=2)[2])
         elseif startswith(arg, "--window-end=")
@@ -128,6 +140,8 @@ function parse_args()
     opts.rounds > 0 || error("rounds must be positive")
     opts.candidates >= opts.batch || error("candidates must be >= batch")
     opts.hyper_samples > 0 || error("hyper_samples must be positive")
+    opts.surface_A_count > 0 || error("surface_A_count must be positive")
+    opts.surface_fee_count > 0 || error("surface_fee_count must be positive")
     return opts
 end
 
@@ -149,6 +163,14 @@ end
         base.log,
     )
 end
+
+# -- grids -------------------------------------------------------------------
+
+logspace(lo::Float64, hi::Float64, count::Int) =
+    [10.0 ^ x for x in range(log10(lo), log10(hi); length=count)]
+
+linspace(lo::Float64, hi::Float64, count::Int) =
+    collect(range(lo, hi; length=count))
 
 function load_dataset_bundle(opts::Options)
     cfg_file = DataIO.load_config(opts.config_path)
@@ -349,6 +371,17 @@ function gp_predict_one(X::Vector{NTuple{2,Float64}}, post, hyp, xstar::NTuple{2
     return μ, sqrt(σ2)
 end
 
+function gp_mean_one(X::Vector{NTuple{2,Float64}}, post, hyp, xstar::NTuple{2,Float64})
+    n = length(X)
+    k = Vector{Float64}(undef, n)
+    σf2 = hyp.σf * hyp.σf
+    @inbounds for i in 1:n
+        d2 = sqdist(X[i], xstar, hyp.l1, hyp.l2)
+        k[i] = σf2 * exp(-0.5 * d2)
+    end
+    return dot(k, post.α) + hyp.y_mean
+end
+
 function select_next_batch(X::Vector{NTuple{2,Float64}}, y::Vector{Float64}, opts::Options;
                            rng::AbstractRNG)
     ll, hyp = fit_gp(X, y; samples=opts.hyper_samples, rng=rng, jitter=opts.jitter)
@@ -446,6 +479,75 @@ function initial_points(opts::Options)
     return pts
 end
 
+function dump_surface(out_path::AbstractString, opts::Options, observations)
+    ok = filter(r -> r[:status] == "ok", observations)
+    isempty(ok) && error("No successful points to build a surface")
+
+    logA_min = log10(opts.A_center / opts.A_factor)
+    logA_max = log10(opts.A_center * opts.A_factor)
+
+    X = NTuple{2,Float64}[]
+    apy = Float64[]
+    vol = Float64[]
+    slip = Float64[]
+    liq = Float64[]
+    for r in ok
+        A = Float64(r[:A])
+        fee = Float64(r[:mid_fee])
+        push!(X, to_features(A, fee, logA_min, logA_max, opts.fee_min, opts.fee_max))
+        m = r[:metrics]
+        push!(apy, Float64(m[:apy]))
+        push!(vol, Float64(m[:volume]))
+        push!(slip, Float64(m[:slippage]))
+        push!(liq, Float64(m[:liquidity_density]))
+    end
+
+    rng = MersenneTwister(opts.seed == 0 ? 1 : opts.seed)
+    surface_hyper = min(opts.hyper_samples, 120)
+    @info "surface fit" points=length(apy) hyper_samples=surface_hyper
+
+    _, hyp_apy = fit_gp(X, apy; samples=surface_hyper, rng=rng, jitter=opts.jitter)
+    post_apy = build_gp_posterior(X, apy, hyp_apy; jitter=opts.jitter)
+    _, hyp_vol = fit_gp(X, vol; samples=surface_hyper, rng=rng, jitter=opts.jitter)
+    post_vol = build_gp_posterior(X, vol, hyp_vol; jitter=opts.jitter)
+    _, hyp_slip = fit_gp(X, slip; samples=surface_hyper, rng=rng, jitter=opts.jitter)
+    post_slip = build_gp_posterior(X, slip, hyp_slip; jitter=opts.jitter)
+    _, hyp_liq = fit_gp(X, liq; samples=surface_hyper, rng=rng, jitter=opts.jitter)
+    post_liq = build_gp_posterior(X, liq, hyp_liq; jitter=opts.jitter)
+
+    As = logspace(opts.A_center / opts.A_factor, opts.A_center * opts.A_factor, opts.surface_A_count)
+    fees = linspace(opts.fee_min, opts.fee_max, opts.surface_fee_count)
+    mkpath(dirname(out_path))
+    open(out_path, "w") do io
+        for A in As, fee in fees
+            xstar = to_features(A, fee, logA_min, logA_max, opts.fee_min, opts.fee_max)
+            apy_hat = gp_mean_one(X, post_apy, hyp_apy, xstar)
+            vol_hat = gp_mean_one(X, post_vol, hyp_vol, xstar)
+            slip_hat = gp_mean_one(X, post_slip, hyp_slip, xstar)
+            liq_hat = gp_mean_one(X, post_liq, hyp_liq, xstar)
+            record = (
+                status = "ok",
+                mode = "kriging_surface",
+                source = opts.output,
+                points = length(ok),
+                A = A,
+                mid_fee = fee,
+                out_fee = fee,
+                metrics = (
+                    apy = max(0.0, apy_hat),
+                    volume = max(0.0, vol_hat),
+                    slippage = max(0.0, slip_hat),
+                    liquidity_density = max(0.0, liq_hat),
+                ),
+            )
+            JSON3.write(io, record)
+            println(io)
+        end
+    end
+    @info "surface written" path=out_path A_points=length(As) fee_points=length(fees)
+    return out_path
+end
+
 function main()
     opts = parse_args()
     opts.seed != 0 && Random.seed!(opts.seed)
@@ -513,6 +615,10 @@ function main()
     isempty(ok) && error("No successful simulations")
     best = ok[findmax(r -> Float64(r[:metrics][:apy]), ok)[2]]
     @info "best observed" A=best[:A] fee=best[:mid_fee] apy=best[:metrics][:apy] volume=best[:metrics][:volume] slippage=best[:metrics][:slippage]
+
+    if !isempty(opts.surface_out)
+        dump_surface(opts.surface_out, opts, observations)
+    end
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
