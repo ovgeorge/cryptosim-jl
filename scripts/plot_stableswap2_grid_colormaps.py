@@ -138,6 +138,7 @@ def render_metric_png(
     cell_px: int = 56,
     font_px: int = 13,
     color_scale: str = "linear",
+    resample: str = "nearest",
 ) -> None:
     As = grid.As
     fees = grid.fees
@@ -192,20 +193,34 @@ def render_metric_png(
     # Title.
     draw.text((10, 10), title, fill=(0, 0, 0), font=font)
 
-    # Heatmap cells (A increases upwards; SVG-style plotting).
+    # Heatmap cells (A increases upwards).
     x0 = margin_left
     y0 = margin_top
-    for iA, A in enumerate(As):
-        # invert vertical index so smallest A is at bottom
-        y = y0 + (nA - 1 - iA) * cell_px
-        for jF, fee in enumerate(fees):
-            x = x0 + jF * cell_px
-            v = Z[iA][jF]
-            draw.rectangle(
-                [x, y, x + cell_px - 1, y + cell_px - 1],
-                fill=color_for(v),
-                outline=(240, 240, 240),
-            )
+    # Render at 1px/cell then upscale (optionally smoothing) to avoid gridline artifacts.
+    try:
+        Resampling = Image.Resampling  # Pillow >= 9
+    except AttributeError:  # pragma: no cover
+        Resampling = Image  # Pillow < 9
+
+    resample_map = {
+        "nearest": Resampling.NEAREST,
+        "bilinear": Resampling.BILINEAR,
+        "bicubic": Resampling.BICUBIC,
+        "lanczos": Resampling.LANCZOS,
+    }
+    method = resample_map.get(resample, Resampling.NEAREST)
+
+    base = Image.new("RGB", (nF, nA), (0, 0, 0))
+    pixels: List[Tuple[int, int, int]] = [(0, 0, 0)] * (nF * nA)
+    for iA in range(nA):
+        row = nA - 1 - iA  # smallest A at bottom
+        off = row * nF
+        Zi = Z[iA]
+        for jF in range(nF):
+            pixels[off + jF] = color_for(Zi[jF])
+    base.putdata(pixels)
+    scaled = base.resize((grid_w, grid_h), resample=method)
+    img.paste(scaled, (x0, y0))
 
     # Axes labels.
     draw.text((margin_left + grid_w / 2 - 60, h - margin_bottom + 55), "mid_fee (= out_fee)", fill=(0, 0, 0), font=font)
@@ -269,6 +284,12 @@ def parse_args() -> argparse.Namespace:
         default="linear",
         help="Color scaling (default: linear)",
     )
+    p.add_argument(
+        "--resample",
+        choices=["nearest", "bilinear", "bicubic", "lanczos"],
+        default="nearest",
+        help="Resampling used when upscaling the grid (default: nearest)",
+    )
     return p.parse_args()
 
 
@@ -289,6 +310,7 @@ def main() -> None:
             title=f"{prefix}: {metric}",
             cell_px=args.cell,
             color_scale=args.color_scale,
+            resample=args.resample,
         )
 
 
