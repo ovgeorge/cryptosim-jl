@@ -52,6 +52,20 @@ def viridis_rgb(t: float) -> Tuple[int, int, int]:
     return stops[-1][1]
 
 
+def pick_tick_indices(n: int, max_ticks: int = 8) -> List[int]:
+    if n <= 0:
+        return []
+    if n <= max_ticks:
+        return list(range(n))
+    # Evenly spaced, always include endpoints.
+    idx = {0, n - 1}
+    if max_ticks <= 2:
+        return sorted(idx)
+    for k in range(1, max_ticks - 1):
+        idx.add(int(round(k * (n - 1) / (max_ticks - 1))))
+    return sorted(idx)
+
+
 @dataclass(frozen=True)
 class Grid:
     As: List[float]
@@ -198,7 +212,10 @@ def render_metric_png(
     draw.text((10, margin_top + grid_h / 2 - 5), "A", fill=(0, 0, 0), font=font)
 
     # X ticks.
+    x_ticks = set(pick_tick_indices(len(fees)))
     for jF, fee in enumerate(fees):
+        if jF not in x_ticks:
+            continue
         x = x0 + jF * cell_px + cell_px / 2
         y = y0 + grid_h + 8
         draw.line([(x, y0 + grid_h), (x, y0 + grid_h + 6)], fill=(0, 0, 0))
@@ -207,7 +224,10 @@ def render_metric_png(
         draw.text((x - tw / 2, y0 + grid_h + 10), label, fill=(0, 0, 0), font=font)
 
     # Y ticks.
+    y_ticks = set(pick_tick_indices(len(As)))
     for iA, A in enumerate(As):
+        if iA not in y_ticks:
+            continue
         y = y0 + (nA - 1 - iA) * cell_px + cell_px / 2
         draw.line([(x0 - 6, y), (x0, y)], fill=(0, 0, 0))
         label = fmt_num(A)
@@ -274,4 +294,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

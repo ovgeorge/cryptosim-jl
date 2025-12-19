@@ -162,11 +162,14 @@ end
     load_candles(name_or_path; pair=(0,1), data_dir=DEFAULT_DATA_DIR)
 
 Streams a Binance-style `[timestamp, "open", "high", ...]` JSON file into memory.
+
+Supports plain `.json` as well as `.json.gz` / `.json.xz` inputs when `source` is a
+filesystem path.
 """
 function load_candles(source::AbstractString; pair::TradePair=(0, 1), data_dir::AbstractString=DEFAULT_DATA_DIR)
     path = _resolve_candle_path(source, data_dir)
-    open(path, "r") do io
-        return _parse_candles(io, pair, path)
+    return _with_candle_io(path) do io
+        _parse_candles(io, pair, path)
     end
 end
 
@@ -178,6 +181,23 @@ function _resolve_candle_path(source::AbstractString, data_dir::AbstractString)
     path = joinpath(data_dir, filename)
     isfile(path) || error("candle file '$source' not found (looked in $data_dir)")
     return path
+end
+
+function _with_candle_io(f, path::AbstractString)
+    lower = lowercase(path)
+    if endswith(lower, ".gz")
+        open(`gzip -dc $path`, "r") do io
+            return f(io)
+        end
+    elseif endswith(lower, ".xz")
+        open(`xz -dc $path`, "r") do io
+            return f(io)
+        end
+    else
+        open(path, "r") do io
+            return f(io)
+        end
+    end
 end
 
 function _parse_candles(io::IO, pair::TradePair, label::AbstractString)
